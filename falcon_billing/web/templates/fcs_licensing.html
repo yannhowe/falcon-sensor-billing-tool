@@ -1,0 +1,125 @@
+{% extends "base.html" %}
+
+{% block title %}FCS Licensing - Falcon Billing{% endblock %}
+
+{% block content %}
+<!-- Overall Summary -->
+<section class="summary-card">
+    <div class="section-header">
+        <h2>Overall Licensing Summary</h2>
+        <div class="filters">
+            <select id="cid-filter" onchange="applyFilters()">
+                <option value="">All CIDs</option>
+            </select>
+        </div>
+    </div>
+    <div class="summary-grid">
+        <div class="metric">
+            <span class="label">Total 28-Day Avg</span>
+            <span class="value" id="overall-avg">-</span>
+            <span class="sublabel">licenses required</span>
+        </div>
+        <div class="metric">
+            <span class="label">Peak Hourly</span>
+            <span class="value" id="overall-max">-</span>
+            <span class="sublabel">maximum sensors</span>
+        </div>
+        <div class="metric">
+            <span class="label">Hours Collected</span>
+            <span class="value" id="hours-collected">-</span>
+            <span class="sublabel">of 672 target</span>
+        </div>
+    </div>
+</section>
+
+<!-- Per-CID Licensing -->
+<section class="data-section">
+    <div class="section-header">
+        <h2>Licensing by CID</h2>
+        <button onclick="exportFCSData('cid')" class="btn-export">Export CSV</button>
+    </div>
+    <div class="table-container">
+        <table id="cid-table">
+            <thead>
+                <tr>
+                    <th data-sort="cid" onclick="sortCIDTable('cid', 'string')" class="sortable">CID</th>
+                    <th data-sort="avg_sensors" onclick="sortCIDTable('avg_sensors')" class="sortable">28-Day Avg</th>
+                    <th data-sort="max_sensors" onclick="sortCIDTable('max_sensors')" class="sortable">Max Hourly</th>
+                    <th data-sort="min_sensors" onclick="sortCIDTable('min_sensors')" class="sortable">Min Hourly</th>
+                    <th data-sort="hours_collected" onclick="sortCIDTable('hours_collected')" class="sortable">Hours</th>
+                    <th data-sort="licenses_required" onclick="sortCIDTable('licenses_required')" class="sortable licenses">Licenses Required</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td colspan="6" class="loading">Loading data...</td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+</section>
+
+<!-- Per-Tag Licensing -->
+<section class="data-section">
+    <div class="section-header">
+        <h2>Licensing by Tag (Sub-CID Allocation)</h2>
+        <div class="filters">
+            <input type="text" id="tag-search" placeholder="Filter tags..." oninput="filterFCSTags()">
+            <button onclick="exportFCSData('tag')" class="btn-export">Export CSV</button>
+        </div>
+    </div>
+    <div class="warning-box">
+        <strong>Important:</strong> Tag totals will exceed CID totals because hosts with multiple tags are counted in each tag.
+        Use tags for <strong>cost allocation</strong>, not total license count.
+    </div>
+    <div class="table-container">
+        <table id="tag-table-fcs">
+            <thead>
+                <tr>
+                    <th data-sort="tag" onclick="sortTagTable('tag', 'string')" class="sortable">Tag</th>
+                    <th data-sort="avg_sensors" onclick="sortTagTable('avg_sensors')" class="sortable">28-Day Avg</th>
+                    <th data-sort="max_sensors" onclick="sortTagTable('max_sensors')" class="sortable">Max Hourly</th>
+                    <th data-sort="hours_active" onclick="sortTagTable('hours_active')" class="sortable">Hours Active</th>
+                    <th data-sort="allocation_units" onclick="sortTagTable('allocation_units')" class="sortable licenses">Allocation Units</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td colspan="5" class="loading">Loading data...</td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+</section>
+
+<!-- Info section -->
+<section class="info-section">
+    <h3>How FCS Licensing Works</h3>
+    <div class="info-grid">
+        <div class="info-box">
+            <h4>28-Day Rolling Average</h4>
+            <p><strong>Formula:</strong> Sum of 672 hourly counts / 672</p>
+            <p>Each sensor active in a clock-hour counts as 1</p>
+        </div>
+        <div class="info-box">
+            <h4>License Types</h4>
+            <p><strong>FCS Runtime:</strong> Cloud VMs + EDR</p>
+            <p><strong>FCSC:</strong> Container hosts</p>
+            <p><strong>FMC:</strong> Managed containers</p>
+        </div>
+        <div class="info-box">
+            <h4>Why Use Tags?</h4>
+            <p><strong>Cost allocation</strong>, not license counting</p>
+            <p>Tag totals exceed CID total because multi-tagged hosts count in each tag</p>
+        </div>
+    </div>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='app.js') }}"></script>
+<script>
+    // FCS-specific initialization
+    document.addEventListener('DOMContentLoaded', () => { loadFCSData(); });
+</script>
+{% endblock %}

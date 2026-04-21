@@ -1,0 +1,16 @@
+# CrowdStrike Falcon Sensor Billing Tool
+# Requirements for Python 3.8+
+
+# CrowdStrike FalconPy SDK for API access
+crowdstrike-falconpy>=1.4.0
+
+# Web interface dependencies
+flask>=3.0.0
+requests>=2.31.0
+
+# Standard library modules (no installation required):
+# - sqlite3: Database layer
+# - csv: CSV export
+# - json: JSON handling
+# - datetime: Timestamp management
+# - argparse: CLI interface

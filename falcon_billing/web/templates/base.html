@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}Falcon Billing{% endblock %}</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"
+            integrity="sha384-e6nUZLBkQ86NJ6TVVKAeSaK8jWa3NhkYWZFomE39AvDbQWeie9PlQqM3pmYW5d1g"
+            crossorigin="anonymous"></script>
+</head>
+<body>
+    <header>
+        <h1>Falcon Sensor Billing Dashboard</h1>
+    </header>
+
+    <!-- API Key Modal -->
+    <div id="auth-modal" class="modal" style="display: none;">
+        <div class="modal-content">
+            <h3>API Key Required</h3>
+            <input type="password" id="api-key-input" placeholder="Enter API key...">
+            <button onclick="saveApiKey()">Submit</button>
+        </div>
+    </div>
+
+    <main>
+        {% block content %}{% endblock %}
+    </main>
+
+    <footer>
+        <p>Falcon Billing Dashboard v1.0.0</p>
+    </footer>
+
+    <script>
+        // API key handling
+        let apiKey = localStorage.getItem('falcon_billing_api_key') || '';
+
+        async function apiFetch(url, options = {}) {
+            const headers = options.headers || {};
+            if (apiKey) {
+                headers['X-API-Key'] = apiKey;
+            }
+            const resp = await fetch(url, { ...options, headers });
+            if (resp.status === 401) {
+                document.getElementById('auth-modal').style.display = 'flex';
+                throw new Error('Unauthorized');
+            }
+            return resp;
+        }
+
+        function saveApiKey() {
+            apiKey = document.getElementById('api-key-input').value;
+            localStorage.setItem('falcon_billing_api_key', apiKey);
+            document.getElementById('auth-modal').style.display = 'none';
+            location.reload();
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+    </script>
+
+    {% block scripts %}{% endblock %}
+</body>
+</html>

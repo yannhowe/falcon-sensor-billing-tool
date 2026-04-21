@@ -1,0 +1,77 @@
+# Logs and temporary files
+*.log
+*.tmp
+*.bak
+*.swp
+*~
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+ENV/
+env/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# Environment files with credentials
+.env
+.falcon_usage_env
+*.env
+
+# Output files (logs and CSVs)
+/var/log/falcon-usage/
+falcon_usage_*.csv
+falcon_usage_*.json
+cron.log
+output/
+
+# Sensitive API response data
+hardware_indicators.json
+imds_enhanced.json
+sensor_usage_api.json
+
+# Database files (NEW)
+*.db
+*.db-wal
+*.db-shm
+
+# Verification reports directory (NEW)
+verification_reports/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Testing
+test_output/
+/tmp/
+
+# Documentation build
+docs/_build/

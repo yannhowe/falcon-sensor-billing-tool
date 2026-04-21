@@ -1,0 +1,27 @@
+[project]
+name = "falcon-billing"
+version = "1.0.0"
+description = "CrowdStrike Falcon sensor billing, cost allocation, and chargeback tool"
+requires-python = ">=3.10"
+dependencies = [
+    "crowdstrike-falconpy>=1.4.0",
+    "flask>=3.0.0",
+    "requests>=2.31.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "pytest-mock"]
+build = ["pyinstaller>=6.0"]
+
+[project.scripts]
+falcon-billing = "falcon_billing.cli.main:main"
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["falcon_billing*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

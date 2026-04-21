@@ -1,0 +1,223 @@
+"""Product and cloud provider classification for Falcon sensors.
+
+Product types: FCSC (container hosts), FMC (managed containers),
+               FCS (cloud VMs), EPP (traditional endpoints)
+
+Cloud providers: AWS, Azure, GCP, Oracle, Alibaba, On-Premise, End-User-Device
+"""
+import json
+import re
+
+
+def classify_sensor(hostname, platform_name, tags, groups=None):
+    """Classify a sensor based on its attributes.
+
+    Args:
+        hostname: Host hostname
+        platform_name: Platform (K8S, Linux, Windows, etc.)
+        tags: JSON string of tags list (or None)
+        groups: JSON string of groups list (optional)
+
+    Returns:
+        str: Product classification (FCSC, FMC, FCS, EPP)
+    """
+    # Parse tags
+    try:
+        tags_list = json.loads(tags) if tags else []
+    except Exception:
+        tags_list = []
+
+    # Parse groups
+    try:
+        groups_list = json.loads(groups) if groups else []
+    except Exception:
+        groups_list = []
+
+    # Convert to lowercase for matching
+    tags_lower = [t.lower() for t in tags_list]
+    hostname_lower = hostname.lower() if hostname else ""
+
+    # ===== FCSC: Container Hosts =====
+    # Kubernetes worker nodes, Docker hosts, ECS cluster EC2 hosts
+
+    # K8S platform is definitely FCSC
+    if platform_name == "K8S":
+        return "FCSC"
+
+    # Check for Kubernetes-related tags
+    k8s_indicators = [
+        'kubernetes', 'k8s', 'worker', 'node', 'aks', 'eks', 'gke',
+        'openshift', 'rancher', 'kube', 'cluster'
+    ]
+    for tag in tags_lower:
+        if any(indicator in tag for indicator in k8s_indicators):
+            return "FCSC"
+
+    # Check for Docker-related tags
+    docker_indicators = ['docker', 'container-host', 'containerd']
+    for tag in tags_lower:
+        if any(indicator in tag for indicator in docker_indicators):
+            return "FCSC"
+
+    # Check hostname patterns for Kubernetes
+    k8s_hostname_patterns = [
+        r'.*-worker.*', r'.*-node.*', r'.*worker.*', r'.*node-\d+.*',
+        r'ip-\d+-\d+-\d+-\d+\..*\.compute\..*',  # AWS EKS pattern
+        r'aks-.*', r'gke-.*'  # AKS/GKE patterns
+    ]
+    for pattern in k8s_hostname_patterns:
+        if re.match(pattern, hostname_lower):
+            return "FCSC"
+
+    # ===== FMC: Fargate, Sidecars, Image-integrated =====
+
+    # Check for Fargate indicators in tags
+    fargate_indicators = ['fargate', 'sidecar', 'ecs-task', 'pod-injection']
+    for tag in tags_lower:
+        if any(indicator in tag for indicator in fargate_indicators):
+            return "FMC"
+
+    # Check hostname for Fargate patterns
+    fargate_patterns = [
+        r'fargate.*', r'ecs-.*-fargate.*', r'.*-sidecar-.*'
+    ]
+    for pattern in fargate_patterns:
+        if re.match(pattern, hostname_lower):
+            return "FMC"
+
+    # ===== FCS: Cloud VMs =====
+    # AWS EC2, Azure VMs, GCP Compute (that aren't container hosts)
+
+    cloud_vm_indicators = [
+        'aws', 'ec2', 'azure', 'gcp', 'cloud', 'vm', 'compute',
+        'instance', 'i-0', 'i-1', 'i-2', 'i-3', 'i-4', 'i-5', 'i-6', 'i-7', 'i-8', 'i-9'
+    ]
+
+    # Check tags for cloud indicators
+    for tag in tags_lower:
+        if any(indicator in tag for indicator in cloud_vm_indicators):
+            return "FCS"
+
+    # Check hostname patterns for cloud VMs
+    cloud_hostname_patterns = [
+        r'ip-\d+-\d+-\d+-\d+',  # AWS private IP format
+        r'i-[0-9a-f]+',  # AWS instance ID
+        r'.*\.compute\.amazonaws\.com',  # AWS compute
+        r'.*\.azure\.com',  # Azure
+        r'.*\.gcp\..*',  # GCP
+    ]
+    for pattern in cloud_hostname_patterns:
+        if re.search(pattern, hostname_lower):
+            return "FCS"
+
+    # Linux/Windows servers in cloud could be FCS if they have cloud-like names
+    if platform_name in ['Linux', 'Windows']:
+        if re.search(r'\d{1,3}-\d{1,3}-\d{1,3}-\d{1,3}', hostname_lower):
+            return "FCS"
+
+    # ===== EPP: Traditional Endpoints =====
+    # Everything else: laptops, workstations, on-premise servers
+
+    return "EPP"
+
+
+def classify_sensor_from_row(row):
+    """Classify a sensor from a database row.
+
+    Args:
+        row: SQLite row object with hostname, platform_name, tags, groups
+
+    Returns:
+        str: Product classification
+    """
+    try:
+        hostname = row['hostname'] if 'hostname' in row.keys() else None
+        platform_name = row['platform_name'] if 'platform_name' in row.keys() else None
+        tags_json = row['tags'] if 'tags' in row.keys() else None
+        groups_json = row['groups'] if 'groups' in row.keys() else None
+    except (KeyError, TypeError):
+        hostname = None
+        platform_name = None
+        tags_json = None
+        groups_json = None
+
+    return classify_sensor(
+        hostname=hostname,
+        platform_name=platform_name,
+        tags=tags_json,
+        groups=groups_json,
+    )
+
+
+def classify_cloud_provider(hostname, platform_name, tags):
+    """Classify cloud provider based on hostname patterns, platform, and tags.
+
+    Args:
+        hostname: Host hostname
+        platform_name: Platform (Linux, Windows, Mac, Android, iOS, etc.)
+        tags: JSON string of tags list (or None)
+
+    Returns:
+        str: Cloud provider classification — one of:
+             AWS, Azure, GCP, Oracle, Alibaba, On-Premise, End-User-Device
+    """
+    # Parse tags
+    try:
+        tags_list = json.loads(tags) if tags else []
+    except Exception:
+        tags_list = []
+
+    tags_lower = [t.lower() for t in tags_list]
+    hostname_lower = hostname.lower() if hostname else ""
+
+    # ===== End-User Devices =====
+    if platform_name in ['Android', 'iOS', 'ChromeOS', 'Mac']:
+        return 'End-User-Device'
+
+    if platform_name == 'Windows':
+        # Classic desktop/laptop hostname patterns (no IP-style naming)
+        if not re.search(r'\d{1,3}-\d{1,3}-\d{1,3}-\d{1,3}', hostname_lower):
+            return 'End-User-Device'
+
+    # ===== Tag-based cloud detection =====
+    tag_provider_map = [
+        (['aws', 'ec2', 'eks'], 'AWS'),
+        (['azure', 'aks'], 'Azure'),
+        (['gcp', 'gke', 'google'], 'GCP'),
+        (['oracle', 'oci'], 'Oracle'),
+        (['alibaba', 'aliyun'], 'Alibaba'),
+    ]
+    for indicators, provider in tag_provider_map:
+        for tag in tags_lower:
+            if any(ind in tag for ind in indicators):
+                return provider
+
+    # ===== Hostname-based cloud detection =====
+
+    # AWS: ip-X-X-X-X.*.ec2.internal / ip-X-X-X-X.*.compute.internal / .amazonaws.com
+    if re.search(r'ip-\d+-\d+-\d+-\d+\..*\.(ec2|compute)\.internal', hostname_lower):
+        return 'AWS'
+    if re.search(r'\.compute\.amazonaws\.com', hostname_lower):
+        return 'AWS'
+    if re.search(r'\bec2\b', hostname_lower):
+        return 'AWS'
+
+    # Azure: *.cloudapp.net / *.azure.com / *.internal.cloudapp.net
+    if re.search(r'\.cloudapp\.net', hostname_lower):
+        return 'Azure'
+    if re.search(r'\.azure\.com', hostname_lower):
+        return 'Azure'
+
+    # GCP: *.c.<project>.internal / gke-* / *.googleapis.com
+    if re.search(r'\.c\.[a-z0-9-]+\.internal', hostname_lower):
+        return 'GCP'
+    if re.search(r'^gke-', hostname_lower):
+        return 'GCP'
+    if re.search(r'\.googleapis\.com', hostname_lower):
+        return 'GCP'
+
+    # ===== Default for servers =====
+    if platform_name in ['Linux', 'Windows']:
+        return 'On-Premise'
+
+    return 'On-Premise'
