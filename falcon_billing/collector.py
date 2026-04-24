@@ -15,7 +15,7 @@ from falconpy import Hosts, OAuth2
 
 from falcon_billing.credentials import load_credentials
 from falcon_billing.database import BillingDatabase
-from falcon_billing.ngsiem import query_ngsiem_for_sensors, NgsiemQueryFailed
+from falcon_billing.ngsiem import query_ngsiem_for_sensors, query_ngsiem_bulk, NgsiemQueryFailed
 
 logger = logging.getLogger(__name__)
 
@@ -240,10 +240,17 @@ def enrich_sensors_with_host_details(
             try:
                 response = falcon_client.get_device_details(ids=batch)
 
-                if response['status_code'] != 200:
+                if response['status_code'] not in (200, 207, 404):
                     error_msg = response.get('body', {}).get('errors', ['Unknown error'])
                     logger.error(f"Failed to get device details: {error_msg}")
                     continue
+
+                # Log any 404s for individual devices but continue with found ones
+                errors = response.get('body', {}).get('errors', [])
+                if errors:
+                    not_found = [e['message'] for e in errors if e.get('code') == 404]
+                    if not_found:
+                        logger.warning(f"{len(not_found)} sensors not found in Hosts API (deleted/decommissioned)")
 
                 resources = response['body'].get('resources', [])
 
@@ -397,6 +404,116 @@ def process_hourly_collection(
 
     # Return metrics
     return unique_count, cache_hits, api_calls
+
+
+def process_bulk_collection(
+    db: BillingDatabase,
+    hours: List[datetime],
+    cid: Optional[str] = None,
+    falcon_client: Optional[Hosts] = None,
+) -> int:
+    """Collect multiple hours in a single NGSIEM query.
+
+    Submits one bulk query covering the full date range, then processes
+    each hour bucket locally. Falls back to per-hour collection on failure.
+
+    Args:
+        db: BillingDatabase instance
+        hours: List of hour datetimes to collect
+        cid: Optional child CID
+        falcon_client: FalconPy Hosts client
+
+    Returns:
+        Number of hours successfully collected.
+    """
+    if not hours:
+        return 0
+
+    if not cid or cid == "default":
+        cid = get_falcon_cid()
+
+    if falcon_client is None:
+        falcon_client = get_falcon_client()
+
+    # Determine date range from the hours list
+    start_hour = min(hours)
+    end_hour = max(hours) + timedelta(hours=1)
+
+    start_iso = start_hour.strftime("%Y-%m-%dT%H:%M:%SZ")
+    end_iso = end_hour.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    logger.info(
+        "Bulk collecting %d hours: %s to %s", len(hours), start_iso, end_iso
+    )
+
+    creds = load_credentials()
+
+    try:
+        hourly_data = query_ngsiem_bulk(
+            start_iso=start_iso,
+            end_iso=end_iso,
+            cid=cid,
+            client_id=creds["client_id"],
+            client_secret=creds["client_secret"],
+            cloud_region=creds["cloud_region"],
+            timeout=120,
+        )
+    except (PermissionError, RuntimeError, TimeoutError) as exc:
+        logger.warning("Bulk NGSIEM query failed (%s), falling back to per-hour", exc)
+        collected = 0
+        for hour in hours:
+            process_hourly_collection(db, hour, cid, falcon_client)
+            collected += 1
+        return collected
+
+    # Collect all unique AIDs across all hours for batch enrichment
+    all_aids = set()
+    for aids in hourly_data.values():
+        all_aids.update(aids)
+
+    logger.info("Enriching %d unique sensors across all hours", len(all_aids))
+    enriched = enrich_sensors_with_host_details(falcon_client, db, list(all_aids))
+
+    # Process each requested hour
+    hours_set = {h.strftime("%Y-%m-%d %H:00:00") for h in hours}
+    collected = 0
+
+    for hour in hours:
+        hour_str = hour.strftime("%Y-%m-%d %H:00:00")
+        sensor_ids = hourly_data.get(hour_str, [])
+
+        if not sensor_ids:
+            logger.info("No sensors for hour %s, recording zero count", hour_str)
+            db.insert_hourly_count(hour_str, cid, 0)
+            collected += 1
+            continue
+
+        # Build sensor log entries from enriched data
+        sensors_to_insert = []
+        for sensor_id in sensor_ids:
+            if sensor_id in enriched:
+                sensors_to_insert.append(enriched[sensor_id])
+            else:
+                sensors_to_insert.append({
+                    "sensor_id": sensor_id,
+                    "hostname": None,
+                    "platform_name": None,
+                    "platform_version": None,
+                    "os_version": None,
+                    "status": None,
+                    "last_seen": None,
+                    "groups": [],
+                    "tags": [],
+                    "cid": cid,
+                })
+
+        db.insert_sensor_logs(hour_str, sensors_to_insert, cid)
+        db.insert_hourly_count(hour_str, cid, len(sensor_ids))
+        db.aggregate_tag_counts(hour_str, cid)
+        collected += 1
+
+    logger.info("Bulk collection complete: %d hours processed", collected)
+    return collected
 
 
 # ============================================================================
@@ -577,10 +694,11 @@ def get_falcon_cid() -> str:
     """
     Get the actual CID (Customer ID) from Falcon API.
 
-    Caches the result to avoid repeated API calls.
+    Tries SensorDownload CCID endpoint first, falls back to reading
+    the cid field from a host record via Hosts API (devices:read).
 
     Returns:
-        str: CID in format "32hexchars-2charChecksum" (e.g., "5DDB0407BEF249C19C7A975F17979A1F-90")
+        str: CID in format "32hexchars-2charChecksum" or plain hex
     """
     global _cached_cid
 
@@ -605,16 +723,34 @@ def get_falcon_cid() -> str:
             base_url=base_url,
         )
 
-        sensor_download = SensorDownload(auth_object=auth)
-        response = sensor_download.get_sensor_installer_ccid()
+        # Method 1: SensorDownload CCID (needs sensor-installers:read)
+        try:
+            sensor_download = SensorDownload(auth_object=auth)
+            response = sensor_download.get_sensor_installer_ccid()
 
-        if response['status_code'] == 200 and response['body']['resources']:
-            _cached_cid = response['body']['resources'][0]
-            logger.info(f"Retrieved CID from Falcon API: {_cached_cid[:16]}...{_cached_cid[-2:]}")
-            return _cached_cid
-        else:
-            logger.warning(f"Failed to retrieve CID from API: {response.get('body', {}).get('errors')}")
-            return 'default'
+            if response['status_code'] == 200 and response['body']['resources']:
+                _cached_cid = response['body']['resources'][0]
+                logger.info(f"Retrieved CID from CCID endpoint: {_cached_cid[:16]}...{_cached_cid[-2:]}")
+                return _cached_cid
+        except Exception:
+            pass
+
+        # Method 2: Read cid from any host record (needs devices:read)
+        try:
+            hosts_client = Hosts(auth_object=auth)
+            query_resp = hosts_client.query_devices_by_filter(limit=1)
+            if query_resp['status_code'] == 200 and query_resp['body']['resources']:
+                aid = query_resp['body']['resources'][0]
+                detail_resp = hosts_client.get_device_details(ids=[aid])
+                if detail_resp['status_code'] == 200 and detail_resp['body']['resources']:
+                    _cached_cid = detail_resp['body']['resources'][0].get('cid', 'default')
+                    logger.info(f"Retrieved CID from host record: {_cached_cid}")
+                    return _cached_cid
+        except Exception as e:
+            logger.warning(f"Failed to retrieve CID from Hosts API: {e}")
+
+        logger.warning("Could not retrieve CID from any API method")
+        return 'default'
 
     except Exception as e:
         logger.warning(f"Error retrieving CID from API: {e}")

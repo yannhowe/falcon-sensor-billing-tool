@@ -27,7 +27,16 @@ Or use the all-in-one script:
 ./run.sh --interval 2       # collect every 2h
 ```
 
-**API Scopes Required:** `hosts:read` and `ngsiem:read`
+**API Scopes Required:**
+
+| Scope | Falcon Console Name | Used By | Required |
+|-------|-------------------|---------|----------|
+| `devices:read` | Host Management: Read | `collect` — device query and details | Yes |
+| `humio-auth-proxy:write` | Event Search: Write | `collect` — NGSIEM query job submission | Yes |
+| `humio-auth-proxy:read` | Event Search: Read | `collect` — NGSIEM query job status polling | Yes |
+| `sensor-installers:read` | Sensor Download: Read | `collect` — CID auto-detection (optional, falls back to Hosts API) | No |
+| `sensor-usage-api:read` | Sensor Usage API: Read | `query`, `verify` — official billing numbers | No (only for `query`/`verify` commands) |
+| `mssp:read` | Flight Control: Read | `multi-tenant` — child CID discovery | No (only for MSSP/Flight Control) |
 
 ## How It Works
 

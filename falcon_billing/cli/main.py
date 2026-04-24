@@ -126,16 +126,15 @@ def main():
 
 def cmd_collect(args):
     from falcon_billing.database import BillingDatabase
-    from falcon_billing.collector import process_hourly_collection, get_falcon_client, get_hours_to_collect
+    from falcon_billing.collector import process_hourly_collection, process_bulk_collection, get_falcon_client, get_hours_to_collect
 
     db = BillingDatabase(args.db)
     falcon_client = get_falcon_client()
 
     if args.days > 0:
-        hours = get_hours_to_collect(db, args.cid, days=args.days)
+        hours = get_hours_to_collect(args.days, db)
         logger.info("Backfilling %d hours", len(hours))
-        for hour in hours:
-            process_hourly_collection(db, hour, args.cid, falcon_client)
+        process_bulk_collection(db, hours, args.cid, falcon_client)
     else:
         now = datetime.now(timezone.utc)
         current_hour = now.replace(minute=0, second=0, microsecond=0)
