@@ -718,10 +718,14 @@ class BillingDatabase:
             if not isinstance(tags, list):
                 tags = []
 
-            for tag in tags:
-                if tag not in tag_sensors:
-                    tag_sensors[tag] = set()
-                tag_sensors[tag].add(sensor_id)
+            # Filter out empty strings from tag list
+            tags = [t for t in tags if t]
+
+            if not tags:
+                tag_sensors.setdefault("(No Tag)", set()).add(sensor_id)
+            else:
+                for tag in tags:
+                    tag_sensors.setdefault(tag, set()).add(sensor_id)
 
         # Bulk insert tag counts
         now = datetime.now(timezone.utc).isoformat()
