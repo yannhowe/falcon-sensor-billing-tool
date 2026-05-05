@@ -174,6 +174,43 @@ FalconGroupingTags/SVCSDEPLOY-TEST,44.80,47,310,45
 | `FALCON_BILLING_DB` | No | `./sensor_billing.db` | Database path |
 | `DASHBOARD_API_KEY` | No | — | API key for dashboard (disabled if unset) |
 
+## NGSIEM Query
+
+The tool queries CrowdStrike NG-SIEM (LogScale) directly via the Humio API to find all sensors active in each clock hour.
+
+**Endpoint:**
+```
+POST https://api.crowdstrike.com/humio/api/v1/repositories/search-all/queryjobs
+```
+Region variants: `api.us-2.crowdstrike.com`, `api.eu-1.crowdstrike.com`, `api.laggar.gcw.crowdstrike.com`
+
+**Required scope:** `ngsiem:read`
+
+**Query:**
+```
+#event_simpleName=AgentOnline OR #event_simpleName=ProcessRollup2 OR #event_simpleName=UserLogon
+| groupBy(aid, function=count())
+| select([aid])
+```
+
+**Request body:**
+```json
+{
+  "queryString": "<query above>",
+  "start": 1746399600000,
+  "end":   1746403200000,
+  "isLive": false
+}
+```
+`start` and `end` are milliseconds since epoch (UTC). Submit the job, then poll `GET {endpoint}/{job_id}` until `done` is `true`.
+
+**Validated behaviour:**
+- Active window → `done: true`, `events: [{aid: ...}, ...]`
+- Empty/past window → `done: true`, `events: []` — **no error, no cancelled flag**
+- The tool logs `NGSIEM query complete: found N unique sensors` on both outcomes
+
+To test the query manually, run `falcon-billing collect --days 0 --verbose` and inspect the logs.
+
 ## Project Structure
 
 ```
