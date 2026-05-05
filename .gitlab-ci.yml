@@ -1,0 +1,43 @@
+collect:
+  image: python:3.12-slim
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+  script:
+    # Install awscli (v1 from PyPI) and the billing tool from source
+    - pip install --quiet awscli .
+
+    # Restore DB from S3 — skip gracefully on first run (no DB yet)
+    - aws s3 cp s3://$S3_BUCKET/sensor_billing.db ./sensor_billing.db || echo "No existing DB in S3, starting fresh."
+
+    # Collect current hour, capturing stdout + stderr for validation
+    - OUTPUT=$(falcon-billing collect --days 0 --prune 2>&1)
+    - echo "$OUTPUT"
+
+    # Guard: fail explicitly if NGSIEM returned 0 sensors (exits 0 silently)
+    - |
+      if echo "$OUTPUT" | grep -q "found 0 unique sensors"; then
+        echo "ERROR: 0 unique sensors found — NGSIEM query returned empty. Check API credentials and ngsiem:read scope."
+        exit 1
+      fi
+
+    # Guard: fail if sensor count line is missing entirely (unexpected failure)
+    - |
+      if ! echo "$OUTPUT" | grep -q "unique sensors"; then
+        echo "ERROR: No sensor count in output — collection may have failed silently. Check logs above."
+        exit 1
+      fi
+
+    # Export CSVs before pushing DB (so artifacts are generated even if S3 push fails)
+    - falcon-billing query --output billing_by_cid.csv
+    - falcon-billing tag-report --output billing_by_tag.csv
+
+    # Persist updated DB back to S3
+    - aws s3 cp ./sensor_billing.db s3://$S3_BUCKET/sensor_billing.db
+
+  artifacts:
+    name: "falcon-billing-$CI_PIPELINE_IID"
+    paths:
+      - billing_by_cid.csv
+      - billing_by_tag.csv
+    expire_in: 90 days
+    when: on_success
