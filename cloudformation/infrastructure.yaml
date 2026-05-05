@@ -1,0 +1,74 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Falcon Sensor Billing Tool — S3 bucket and GitLab CI IAM user
+
+Parameters:
+  BucketName:
+    Type: String
+    Description: Globally unique S3 bucket name (e.g. my-org-falcon-billing)
+
+Resources:
+
+  BillingBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref BucketName
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: true
+        RestrictPublicBuckets: true
+
+  GitLabCIUser:
+    Type: AWS::IAM::User
+    Properties:
+      UserName: gitlab-falcon-billing-ci
+
+  GitLabCIPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: gitlab-falcon-billing-s3
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+            Resource: !Sub "arn:aws:s3:::${BucketName}/sensor_billing.db"
+      Users:
+        - !Ref GitLabCIUser
+
+  GitLabCIAccessKey:
+    Type: AWS::IAM::AccessKey
+    Properties:
+      UserName: !Ref GitLabCIUser
+
+  # Credentials stored in Secrets Manager (encrypted at rest, access-controlled via IAM)
+  # instead of stack outputs (which are plaintext and visible to anyone with
+  # cloudformation:DescribeStacks permission).
+  #
+  # Retrieve with:
+  #   aws secretsmanager get-secret-value \
+  #     --secret-id /falcon-billing/gitlab-ci-credentials \
+  #     --query SecretString --output text
+  GitLabCICredentials:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: /falcon-billing/gitlab-ci-credentials
+      Description: AWS credentials for Falcon Billing GitLab CI pipeline
+      SecretString: !Sub |
+        {
+          "aws_access_key_id": "${GitLabCIAccessKey}",
+          "aws_secret_access_key": "${GitLabCIAccessKey.SecretAccessKey}"
+        }
+
+Outputs:
+  BucketName:
+    Description: S3 bucket name — set as S3_BUCKET GitLab CI/CD variable
+    Value: !Ref BillingBucket
+
+  CredentialsSecretArn:
+    Description: Secrets Manager ARN — retrieve AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY from here
+    Value: !Ref GitLabCICredentials
