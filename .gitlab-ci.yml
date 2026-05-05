@@ -1,4 +1,9 @@
+stages:
+  - collect
+  - report
+
 collect:
+  stage: collect
   image: python:3.12-slim
   rules:
     - if: $CI_PIPELINE_SOURCE == "schedule"
@@ -35,15 +40,30 @@ collect:
         exit 1
       fi
 
-    # Export CSVs before pushing DB (so artifacts are generated even if S3 push fails)
+    # Persist updated DB back to S3
+    - aws s3 cp ./sensor_billing.db s3://$S3_BUCKET/sensor_billing.db
+
+  artifacts:
+    paths:
+      - sensor_billing.db
+    expire_in: 1 day
+
+report:
+  stage: report
+  image: python:3.12-slim
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+  retry: 2
+  script:
+    # Install awscli (v1 from PyPI) and the billing tool from source
+    - pip install --quiet awscli .
+
+    # Export CSVs from the DB passed by the collect job
     # log_to_csv creates billing_by_cid.csv/ (CSV dir) and billing_by_cid.json/ (JSON dir);
     # pre-create the JSON dir since log_to_csv uses makedirs for CSV but not JSON.
     - mkdir -p billing_by_cid.json
     - falcon-billing query --output billing_by_cid.csv
     - falcon-billing tag-report --output billing_by_tag.csv
-
-    # Persist updated DB back to S3
-    - aws s3 cp ./sensor_billing.db s3://$S3_BUCKET/sensor_billing.db
 
   artifacts:
     name: "falcon-billing-$CI_PIPELINE_IID"
