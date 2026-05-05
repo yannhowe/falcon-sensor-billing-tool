@@ -9,14 +9,22 @@ collect:
     # Restore DB from S3 — skip gracefully on first run (no DB yet)
     - aws s3 cp s3://$S3_BUCKET/sensor_billing.db ./sensor_billing.db || echo "No existing DB in S3, starting fresh."
 
-    # Collect current hour, capturing stdout + stderr for validation
-    - OUTPUT=$(falcon-billing collect --days 0 --prune 2>&1)
+    # Collect current hour — write output to file to preserve exit code
+    - falcon-billing collect --days 0 --prune > /tmp/collect_output.txt 2>&1; COLLECT_EXIT=$?
+    - OUTPUT=$(cat /tmp/collect_output.txt)
     - echo "$OUTPUT"
 
-    # Guard: fail explicitly if NGSIEM returned 0 sensors (exits 0 silently)
+    # Fail explicitly if the collect command itself exited non-zero
     - |
-      if echo "$OUTPUT" | grep -q "found 0 unique sensors"; then
-        echo "ERROR: 0 unique sensors found — NGSIEM query returned empty. Check API credentials and ngsiem:read scope."
+      if [ "$COLLECT_EXIT" -ne 0 ]; then
+        echo "ERROR: Collection command failed with exit code $COLLECT_EXIT. Check logs above."
+        exit 1
+      fi
+
+    # Guard: fail if stored sensor count is 0 (covers NGSIEM and Hosts API fallback paths)
+    - |
+      if echo "$OUTPUT" | grep -q "Stored hourly count: 0"; then
+        echo "ERROR: 0 unique sensors stored — collection returned empty. Check API credentials and ngsiem:read scope."
         exit 1
       fi
 
