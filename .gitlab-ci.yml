@@ -36,6 +36,9 @@ collect:
       fi
 
     # Export CSVs before pushing DB (so artifacts are generated even if S3 push fails)
+    # log_to_csv creates billing_by_cid.csv/ (CSV dir) and billing_by_cid.json/ (JSON dir);
+    # pre-create the JSON dir since log_to_csv uses makedirs for CSV but not JSON.
+    - mkdir -p billing_by_cid.json
     - falcon-billing query --output billing_by_cid.csv
     - falcon-billing tag-report --output billing_by_tag.csv
 
@@ -45,7 +48,7 @@ collect:
   artifacts:
     name: "falcon-billing-$CI_PIPELINE_IID"
     paths:
-      - billing_by_cid.csv
+      - billing_by_cid.csv/
       - billing_by_tag.csv
     expire_in: 90 days
     when: on_success
