@@ -10,9 +10,10 @@ collect:
   script:
     # Install awscli (v1 from PyPI) and the billing tool from source
     - pip install --quiet awscli .
+    - apt-get install -qq -y sqlite3 > /dev/null
 
-    # Restore DB from S3 — skip gracefully on first run (no DB yet)
-    - aws s3 cp s3://$S3_BUCKET/sensor_billing.db ./sensor_billing.db || echo "No existing DB in S3, starting fresh."
+    # Restore DB from S3 (gzip compressed) — skip gracefully on first run
+    - aws s3 cp s3://$S3_BUCKET/sensor_billing.db.gz - | gunzip > sensor_billing.db || echo "No existing DB in S3, starting fresh."
 
     # Collect current hour — write output to file to preserve exit code
     - falcon-billing collect --days 0 --prune > /tmp/collect_output.txt 2>&1; COLLECT_EXIT=$?
@@ -40,33 +41,58 @@ collect:
         exit 1
       fi
 
-    # Persist updated DB back to S3
-    - aws s3 cp ./sensor_billing.db s3://$S3_BUCKET/sensor_billing.db
+    # Persist updated DB back to S3 (gzip compressed — ~10x smaller)
+    - gzip -c sensor_billing.db | aws s3 cp - s3://$S3_BUCKET/sensor_billing.db.gz
 
 report:
   stage: report
   image: python:3.12-slim
   rules:
     - if: $CI_PIPELINE_SOURCE == "schedule"
-  retry: 2
   script:
-    # Install awscli (v1 from PyPI) and the billing tool from source
-    - pip install --quiet awscli .
+    - apt-get install -qq -y sqlite3 > /dev/null
+    - pip install --quiet awscli
 
     # Fetch updated DB from S3 (written by collect job)
-    - aws s3 cp s3://$S3_BUCKET/sensor_billing.db ./sensor_billing.db
+    - aws s3 cp s3://$S3_BUCKET/sensor_billing.db.gz - | gunzip > sensor_billing.db
 
-    # Export CSVs
-    # log_to_csv creates billing_by_cid.csv/ (CSV dir) and billing_by_cid.json/ (JSON dir);
-    # pre-create the JSON dir since log_to_csv uses makedirs for CSV but not JSON.
-    - mkdir -p billing_by_cid.json
-    - falcon-billing query --output billing_by_cid.csv
-    - falcon-billing tag-report --output billing_by_tag.csv
+    # Export 28-day per-CID summary directly from local DB (no NGSIEM re-query)
+    - |
+      sqlite3 -csv -header sensor_billing.db "
+        SELECT
+          cid,
+          COUNT(*) AS hours_collected,
+          ROUND(AVG(unique_sensor_count), 2) AS avg_28day,
+          MAX(unique_sensor_count) AS peak,
+          MIN(unique_sensor_count) AS min_hourly
+        FROM hourly_counts
+        WHERE hour_timestamp >= datetime('now', '-28 days')
+        GROUP BY cid
+        ORDER BY avg_28day DESC
+      " > billing_by_cid.csv
+
+    # Export 28-day per-tag summary directly from local DB (no NGSIEM re-query)
+    - |
+      sqlite3 -csv -header sensor_billing.db "
+        SELECT
+          tag,
+          cid,
+          COUNT(*) AS hours_collected,
+          ROUND(AVG(unique_sensor_count), 2) AS avg_28day,
+          MAX(unique_sensor_count) AS peak
+        FROM hourly_tag_counts
+        WHERE hour_timestamp >= datetime('now', '-28 days')
+        GROUP BY tag, cid
+        ORDER BY avg_28day DESC
+      " > billing_by_tag.csv
+
+    - echo "billing_by_cid.csv rows:$(wc -l < billing_by_cid.csv)"
+    - echo "billing_by_tag.csv rows:$(wc -l < billing_by_tag.csv)"
 
   artifacts:
     name: "falcon-billing-$CI_PIPELINE_IID"
     paths:
-      - billing_by_cid.csv/
+      - billing_by_cid.csv
       - billing_by_tag.csv
     expire_in: 90 days
     when: on_success
