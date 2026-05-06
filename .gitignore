@@ -75,3 +75,4 @@ test_output/
 
 # Documentation build
 docs/_build/
+.claude/
