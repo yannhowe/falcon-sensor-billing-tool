@@ -10,7 +10,7 @@ collect:
   script:
     # Install awscli (v1 from PyPI) and the billing tool from source
     - pip install --quiet awscli .
-    - apt-get install -qq -y sqlite3 > /dev/null
+    - apt-get update -qq && apt-get install -qq -y sqlite3 > /dev/null
 
     # Restore DB from S3 (gzip compressed) — skip gracefully on first run
     - aws s3 cp s3://$S3_BUCKET/sensor_billing.db.gz - | gunzip > sensor_billing.db || echo "No existing DB in S3, starting fresh."
@@ -50,7 +50,7 @@ report:
   rules:
     - if: $CI_PIPELINE_SOURCE == "schedule"
   script:
-    - apt-get install -qq -y sqlite3 > /dev/null
+    - apt-get update -qq && apt-get install -qq -y sqlite3 > /dev/null
     - pip install --quiet awscli
 
     # Fetch updated DB from S3 (written by collect job)
