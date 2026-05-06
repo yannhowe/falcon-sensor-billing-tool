@@ -134,7 +134,7 @@ def cmd_collect(args):
     falcon_client = get_falcon_client()
 
     if args.days > 0:
-        hours = get_hours_to_collect(db, args.cid, days=args.days)
+        hours = get_hours_to_collect(args.days, db)
         logger.info("Backfilling %d hours", len(hours))
         if len(hours) > 1 and args.workers > 1:
             parallel_backfill(db, hours, args.cid, falcon_client, workers=args.workers)
