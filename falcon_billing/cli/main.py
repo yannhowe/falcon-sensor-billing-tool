@@ -46,6 +46,8 @@ def main():
                            help="Auto-prune old data after collection")
     p_collect.add_argument("--retain-days", type=int, default=395,
                            help="Days to retain when pruning (default: 395)")
+    p_collect.add_argument("--workers", type=int, default=10,
+                           help="Parallel workers for backfill NGSIEM queries (default: 10)")
 
     # --- query ---
     p_query = subparsers.add_parser("query", help="Query Sensor Usage API")
@@ -126,15 +128,19 @@ def main():
 
 def cmd_collect(args):
     from falcon_billing.database import BillingDatabase
-    from falcon_billing.collector import process_hourly_collection, process_bulk_collection, get_falcon_client, get_hours_to_collect
+    from falcon_billing.collector import process_hourly_collection, get_falcon_client, get_hours_to_collect, parallel_backfill
 
     db = BillingDatabase(args.db)
     falcon_client = get_falcon_client()
 
     if args.days > 0:
-        hours = get_hours_to_collect(args.days, db)
+        hours = get_hours_to_collect(db, args.cid, days=args.days)
         logger.info("Backfilling %d hours", len(hours))
-        process_bulk_collection(db, hours, args.cid, falcon_client)
+        if len(hours) > 1 and args.workers > 1:
+            parallel_backfill(db, hours, args.cid, falcon_client, workers=args.workers)
+        else:
+            for hour in hours:
+                process_hourly_collection(db, hour, args.cid, falcon_client)
     else:
         now = datetime.now(timezone.utc)
         current_hour = now.replace(minute=0, second=0, microsecond=0)

@@ -16,7 +16,7 @@ collect:
     - aws s3 cp s3://$S3_BUCKET/sensor_billing.db.gz - | gunzip > sensor_billing.db || echo "No existing DB in S3, starting fresh."
 
     # Collect current hour — write output to file to preserve exit code
-    - falcon-billing collect --days 0 --prune > /tmp/collect_output.txt 2>&1; COLLECT_EXIT=$?
+    - falcon-billing collect --days 0 --prune --workers 10 > /tmp/collect_output.txt 2>&1; COLLECT_EXIT=$?
     - OUTPUT=$(cat /tmp/collect_output.txt)
     - echo "$OUTPUT"
 
