@@ -157,20 +157,98 @@ def cmd_collect(args):
 
 
 def cmd_query(args):
-    from falcon_billing.billing import get_sensor_usage, get_sensor_usage_for_cid, print_summary, log_to_csv
+    from falcon_billing.database import BillingDatabase
 
-    hourly = args.hourly and not args.weekly
+    db = BillingDatabase(args.db)
+    hourly = args.hourly
+    cid = args.cid or "default"
 
-    if args.cid:
-        data = get_sensor_usage_for_cid(args.cid, hourly=hourly)
-    else:
-        data = get_sensor_usage(hourly=hourly)
+    # Auto-resolve CID: if 'default', pick the CID with the most rows in the DB
+    if cid == "default":
+        row = db.get_connection().execute(
+            "SELECT cid FROM hourly_counts GROUP BY cid ORDER BY COUNT(*) DESC LIMIT 1"
+        ).fetchone()
+        if row:
+            cid = row["cid"]
 
-    print_summary(data, hourly=hourly)
+    summary = db.calculate_28day_average(cid=cid)
+    avgs = summary["averages"]
+    hours_with_data = summary["hours_with_data"]
+    period_hours = summary["period_hours"]
+    coverage_pct = (hours_with_data / period_hours * 100) if period_hours > 0 else 0
+
+    print("\n" + "=" * 70)
+    print("USAGE SUMMARY (from local NGSIEM data)")
+    print("=" * 70)
+    print(f"\nCID:    {summary['cid']}")
+    print(f"Period: {summary['period_start']} → {summary['period_end']}")
+    print(f"Data:   {hours_with_data}/{period_hours} hours ({coverage_pct:.1f}% coverage)")
+    print(f"\n{summary['period_days']}-day rolling averages:")
+    print(f"  Total Sensors:    {avgs['total']:.2f}")
+    print(f"  FCS (Cloud VMs):  {avgs['fcs']:.2f}")
+    print(f"  EPP (Endpoints):  {avgs['epp']:.2f}")
+    print(f"  FCSC (Cont Hosts):{avgs['fcsc']:.2f}")
+    print(f"  FMC (Pods):       {avgs['fmc']:.2f}")
+    print(f"\nCHARGEBACK BREAKDOWN:")
+    print(f"  FCS licenses:     {avgs['fcs']:.2f}")
+    print(f"  FCSC licenses:    {avgs['fcsc']:.2f}")
+    print(f"  FMC licenses:     {avgs['fmc']:.2f}")
+
+    hourly_rows = []
+    if hourly:
+        hourly_rows = db.get_hourly_counts_for_range(
+            summary["period_start"], summary["period_end"], cid=cid
+        )
+        print(f"\nPer-hour breakdown ({len(hourly_rows)} hours):")
+        print(f"  {'Hour':<20} {'Total':>7} {'FCS':>7} {'FCSC':>7} {'FMC':>7} {'EPP':>7}")
+        print(f"  {'-'*20} {'-'*7} {'-'*7} {'-'*7} {'-'*7} {'-'*7}")
+        for r in hourly_rows:
+            print(
+                f"  {r['hour_timestamp']:<20} {r['unique_sensor_count']:>7}"
+                f" {r.get('fcs_count') or 0:>7} {r.get('fcsc_count') or 0:>7}"
+                f" {r.get('fmc_count') or 0:>7} {r.get('epp_count') or 0:>7}"
+            )
+
+    print("=" * 70 + "\n")
 
     if args.output:
-        log_to_csv(data, str(args.output), hourly=hourly)
-        print(f"Results written to {args.output}")
+        import os
+        output_dir = str(args.output)
+        os.makedirs(output_dir, exist_ok=True)
+        label = "hourly" if hourly else "weekly"
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        csv_path = os.path.join(output_dir, f"falcon_ngsiem_{label}_{ts}.csv")
+        json_path = csv_path.replace(".csv", ".json")
+
+        if hourly and hourly_rows:
+            fieldnames = ["hour_timestamp", "unique_sensor_count", "fcs_count",
+                          "fcsc_count", "fmc_count", "epp_count"]
+            rows_out = [dict(r) for r in hourly_rows]
+        else:
+            fieldnames = ["period_start", "period_end", "period_days", "hours_with_data",
+                          "avg_total", "avg_fcs", "avg_fcsc", "avg_fmc", "avg_epp", "retrieved_at"]
+            rows_out = [{
+                "period_start": summary["period_start"],
+                "period_end": summary["period_end"],
+                "period_days": summary["period_days"],
+                "hours_with_data": hours_with_data,
+                "avg_total": round(avgs["total"], 4),
+                "avg_fcs": round(avgs["fcs"], 4),
+                "avg_fcsc": round(avgs["fcsc"], 4),
+                "avg_fmc": round(avgs["fmc"], 4),
+                "avg_epp": round(avgs["epp"], 4),
+                "retrieved_at": datetime.now().isoformat(),
+            }]
+
+        with open(csv_path, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+            writer.writeheader()
+            writer.writerows(rows_out)
+
+        with open(json_path, "w") as f:
+            json.dump(summary, f, indent=2)
+
+        print(f"Results written to {csv_path}")
 
 
 def cmd_multi_tenant(args):

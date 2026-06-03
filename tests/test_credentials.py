@@ -30,7 +30,13 @@ class TestLoadCredentials:
         creds = load_credentials()
         assert creds["cloud_region"] == "us-1"
 
-    def test_missing_credentials_raises(self):
+    def test_missing_credentials_raises(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("FALCON_CLIENT_ID", raising=False)
+        monkeypatch.delenv("FALCON_CLIENT_SECRET", raising=False)
+        # Point profile to a non-existent path so keychain is skipped
+        monkeypatch.setattr("falcon_billing.credentials.PROFILE_PATH", tmp_path / ".nonexistent")
+        # Make keychain calls return empty so no fallback succeeds
+        monkeypatch.setattr("falcon_billing.credentials._query_keychain", lambda s, a: "")
         with pytest.raises(CredentialError, match="No Falcon API credentials found"):
             load_credentials()
 

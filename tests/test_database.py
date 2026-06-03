@@ -106,7 +106,7 @@ class TestHourlyCounts:
 class TestPruning:
     def test_prune_removes_old_data(self, db):
         old_ts = "2025-01-01 10:00:00"
-        recent_ts = "2026-04-21 10:00:00"
+        recent_ts = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")
 
         db.insert_hourly_count(old_ts, "default", 100)
         db.insert_hourly_count(recent_ts, "default", 200)
@@ -115,7 +115,7 @@ class TestPruning:
         assert result["hourly_counts"] >= 1
 
         counts = db.get_hourly_counts_for_range(
-            "2025-01-01 00:00:00", "2026-12-31 23:59:59", "default"
+            "2025-01-01 00:00:00", "2099-12-31 23:59:59", "default"
         )
         assert len(counts) == 1
         assert counts[0]["unique_sensor_count"] == 200
@@ -158,19 +158,19 @@ class TestAuditLog:
 
 class TestCalculate28DayAverage:
     def test_average_calculation(self, db):
-        base = datetime(2026, 3, 24, 0, 0, 0)
+        base = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0) - timedelta(hours=671)
         for i in range(672):
             ts = (base + timedelta(hours=i)).strftime("%Y-%m-%d %H:%M:%S")
             db.insert_hourly_count(ts, "default", 100)
 
-        avg = db.calculate_28day_average("default")
+        avg = db.calculate_28day_average("default")["averages"]["total"]
         assert avg == 100.0
 
     def test_average_with_partial_data(self, db):
-        base = datetime(2026, 4, 7, 0, 0, 0)
+        base = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0) - timedelta(hours=335)
         for i in range(336):
             ts = (base + timedelta(hours=i)).strftime("%Y-%m-%d %H:%M:%S")
             db.insert_hourly_count(ts, "default", 100)
 
-        avg = db.calculate_28day_average("default")
+        avg = db.calculate_28day_average("default")["averages"]["total"]
         assert avg == pytest.approx(50.0, abs=0.1)

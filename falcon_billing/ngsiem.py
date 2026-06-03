@@ -14,16 +14,45 @@ logger = logging.getLogger(__name__)
 
 # LogScale query to find unique sensors (agent IDs) active during a time window
 _SENSOR_QUERY = """
-#event_simpleName=AgentOnline OR #event_simpleName=ProcessRollup2 OR #event_simpleName=UserLogon
+#event_simpleName=SensorHeartbeat
 | groupBy(aid, function=count())
 | select([aid])
 """
 
 # Bulk query: format timestamp as hour key and return unique AIDs per hour
 _BULK_SENSOR_QUERY = """
-#event_simpleName=AgentOnline OR #event_simpleName=ProcessRollup2 OR #event_simpleName=UserLogon
+#event_simpleName=SensorHeartbeat
 | hour_key := formatTime("%Y-%m-%d %H:00:00", field=@timestamp, timezone="UTC")
 | groupBy([hour_key, aid], function=count())
+"""
+
+# FCS query: SensorHeartbeat AIDs that are NOT pods AND NOT container runtime hosts
+# Uses !join anti-join to exclude AIDs that emitted OCI container events (FCSC hosts)
+_FCS_QUERY = """
+#event_simpleName=SensorHeartbeat
+| ProductType!=Pod
+| groupBy([aid])
+| !join(query={
+    (#event_simpleName=OciContainerStarted OR #event_simpleName=OciContainerTelemetry)
+    | groupBy([aid])
+  }, field=[aid], key=[aid], mode=inner)
+| select([aid])
+"""
+
+# FCSC query: AIDs that emitted OCI container events, excluding pods (container runtime hosts)
+_CONTAINER_HOST_QUERY = """
+(#event_simpleName=OciContainerStarted OR #event_simpleName=OciContainerTelemetry)
+| ProductType!=Pod
+| groupBy(aid, function=count())
+| select([aid])
+"""
+
+# FMC query: pod sensors identified by ProductType=Pod in SensorHeartbeat
+_FMC_QUERY = """
+#event_simpleName=SensorHeartbeat
+| ProductType=Pod
+| groupBy(aid, function=count())
+| select([aid])
 """
 
 
@@ -93,6 +122,7 @@ def _execute_ngsiem_query(
     cloud_region: str = "us-1",
     view_name: str = "search-all",
     timeout: int = 30,
+    query_string: str = _SENSOR_QUERY,
 ) -> list[str]:
     """Execute a single NGSIEM query and return unique sensor IDs.
 
@@ -149,7 +179,7 @@ def _execute_ngsiem_query(
     }
 
     body = {
-        "queryString": _SENSOR_QUERY,
+        "queryString": query_string,
         "start": start_ms,
         "end": end_ms,
         "isLive": False,
@@ -170,7 +200,7 @@ def _execute_ngsiem_query(
     if response.status_code == 403:
         raise PermissionError(
             f"NGSIEM query failed (403): Permission denied. "
-            f"Add 'ngsiem:write' (Event Search: Write) scope to your Falcon API client."
+            f"Add 'humio-auth-proxy:write' (Event Search: Write) scope to your Falcon API client."
         )
 
     if response.status_code != 200:
@@ -241,6 +271,7 @@ def query_ngsiem_for_sensors(
     view_name: str = "search-all",
     max_retries: int = 3,
     timeout_sequence: tuple[int, ...] = (30, 60, 120),
+    query_string: str = _SENSOR_QUERY,
 ) -> list[str]:
     """Query NGSIEM for sensors active during a given hour, with retry logic.
 
@@ -284,6 +315,7 @@ def query_ngsiem_for_sensors(
                 cloud_region=cloud_region,
                 view_name=view_name,
                 timeout=timeout,
+                query_string=query_string,
             )
         except _retryable as exc:
             last_exc = exc
@@ -299,6 +331,92 @@ def query_ngsiem_for_sensors(
 
     raise NgsiemQueryFailed(
         f"NGSIEM query failed after {max_retries} attempts: {last_exc}"
+    )
+
+
+def query_ngsiem_for_fcs(
+    hour_start: str,
+    hour_end: str,
+    cid: str,
+    *,
+    client_id: str,
+    client_secret: str,
+    cloud_region: str = "us-1",
+    view_name: str = "search-all",
+    max_retries: int = 3,
+    timeout_sequence: tuple[int, ...] = (30, 60, 120),
+) -> list[str]:
+    """Query NGSIEM for FCS AIDs (SensorHeartbeat, ProductType!=Pod, no OCI events).
+
+    Uses !join anti-join to exclude any AID that also appears in OCI container events,
+    ensuring no overlap with FCSC. Combined with FMC and FCSC counts, should tally
+    exactly with the total SensorHeartbeat count.
+    """
+    return query_ngsiem_for_sensors(
+        hour_start,
+        hour_end,
+        cid,
+        client_id=client_id,
+        client_secret=client_secret,
+        cloud_region=cloud_region,
+        view_name=view_name,
+        max_retries=max_retries,
+        timeout_sequence=timeout_sequence,
+        query_string=_FCS_QUERY,
+    )
+
+
+def query_ngsiem_for_container_hosts(
+    hour_start: str,
+    hour_end: str,
+    cid: str,
+    *,
+    client_id: str,
+    client_secret: str,
+    cloud_region: str = "us-1",
+    view_name: str = "search-all",
+    max_retries: int = 3,
+    timeout_sequence: tuple[int, ...] = (30, 60, 120),
+) -> list[str]:
+    """Query NGSIEM for FCSC container host AIDs (OCI events, ProductType!=Pod)."""
+    return query_ngsiem_for_sensors(
+        hour_start,
+        hour_end,
+        cid,
+        client_id=client_id,
+        client_secret=client_secret,
+        cloud_region=cloud_region,
+        view_name=view_name,
+        max_retries=max_retries,
+        timeout_sequence=timeout_sequence,
+        query_string=_CONTAINER_HOST_QUERY,
+    )
+
+
+def query_ngsiem_for_fmc(
+    hour_start: str,
+    hour_end: str,
+    cid: str,
+    *,
+    client_id: str,
+    client_secret: str,
+    cloud_region: str = "us-1",
+    view_name: str = "search-all",
+    max_retries: int = 3,
+    timeout_sequence: tuple[int, ...] = (30, 60, 120),
+) -> list[str]:
+    """Query NGSIEM for FMC pod sensor AIDs (SensorHeartbeat, ProductType=Pod)."""
+    return query_ngsiem_for_sensors(
+        hour_start,
+        hour_end,
+        cid,
+        client_id=client_id,
+        client_secret=client_secret,
+        cloud_region=cloud_region,
+        view_name=view_name,
+        max_retries=max_retries,
+        timeout_sequence=timeout_sequence,
+        query_string=_FMC_QUERY,
     )
 
 

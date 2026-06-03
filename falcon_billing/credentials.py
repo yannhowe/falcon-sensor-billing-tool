@@ -39,22 +39,39 @@ def load_credentials() -> dict:
             "cloud_region": cloud_region,
         }
 
-    # Priority 2+3: macOS Keychain
+    # Priority 2+3: macOS Keychain — try both naming conventions
     profile = get_active_cid_profile()
     try:
+        # Convention A: service=falcon_{profile}, account=client_id (original format)
         kc_id = _query_keychain(f"falcon_{profile}", "client_id")
         kc_secret = _query_keychain(f"falcon_{profile}", "client_secret")
         kc_cloud = _query_keychain(f"falcon_{profile}", "cloud") or "us-1"
 
         if kc_id and kc_secret:
-            logger.debug("Loaded credentials from Keychain profile: %s", profile)
+            logger.debug("Loaded credentials from Keychain profile: %s (format A)", profile)
             return {
                 "client_id": kc_id,
                 "client_secret": kc_secret,
                 "cloud_region": kc_cloud,
             }
     except (FileNotFoundError, subprocess.CalledProcessError, OSError) as e:
-        logger.debug("Keychain query failed: %s", e)
+        logger.debug("Keychain query failed (format A): %s", e)
+
+    try:
+        # Convention B: service=falcon-client-id, account={profile} (cid-manager.sh format)
+        kc_id = _query_keychain("falcon-client-id", profile)
+        kc_secret = _query_keychain("falcon-client-secret", profile)
+        kc_cloud = _query_keychain("falcon-cloud-region", profile) or "us-1"
+
+        if kc_id and kc_secret:
+            logger.debug("Loaded credentials from Keychain profile: %s (format B)", profile)
+            return {
+                "client_id": kc_id,
+                "client_secret": kc_secret,
+                "cloud_region": kc_cloud,
+            }
+    except (FileNotFoundError, subprocess.CalledProcessError, OSError) as e:
+        logger.debug("Keychain query failed (format B): %s", e)
 
     raise CredentialError(
         "No Falcon API credentials found. Set FALCON_CLIENT_ID and "

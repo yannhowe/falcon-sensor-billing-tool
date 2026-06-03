@@ -149,6 +149,90 @@ def classify_sensor_from_row(row):
     )
 
 
+def is_cloud_vm(manufacturer=None, cloud_provider=None, tags=None) -> bool:
+    """Determine if a host is a cloud VM (FCS-billable) vs on-prem endpoint (EPP).
+
+    Classification priority:
+    1. cloud_provider field (IMDS auto-detected) — most reliable
+    2. system_manufacturer (hypervisor DMI) — authoritative, not user-editable
+    3. sensor_tags fallback — least reliable (user-applied, can be wrong)
+
+    Args:
+        manufacturer: system_manufacturer from Hosts API (DMI string)
+        cloud_provider: cloud_provider from Hosts API (IMDS auto-detected)
+        tags: JSON string or list of sensor tags
+
+    Returns:
+        bool: True if cloud VM (FCS), False if on-prem endpoint (EPP)
+    """
+    # --- Primary: cloud_provider field (IMDS auto-detected) ---
+    if cloud_provider:
+        cp_lower = cloud_provider.strip().lower()
+        cloud_cp_values = {
+            'aws', 'azure', 'gcp', 'oci', 'oracle',
+            'alibaba', 'huawei', 'tencent', 'volcengine',
+        }
+        if cp_lower in cloud_cp_values:
+            return True
+
+    # --- Secondary: system_manufacturer (hypervisor DMI) ---
+    if manufacturer:
+        mfr_lower = manufacturer.strip().lower()
+
+        # Explicit cloud DMI patterns
+        cloud_mfr_patterns = [
+            'amazon ec2',
+            'amazon',
+            'microsoft corporation',  # Azure VMs
+            'google',
+            'alibaba cloud',
+            'alibaba',
+            'aliyun',
+            'oracle cloud',
+            'huawei cloud',
+            'tencent cloud',
+        ]
+        for pattern in cloud_mfr_patterns:
+            if pattern in mfr_lower:
+                return True
+
+        # Explicit on-prem / hypervisor patterns — return False immediately
+        onprem_mfr_patterns = [
+            'vmware',
+            'innotek',   # VirtualBox
+            'bochs',     # KVM/QEMU
+            'qemu',
+            'red hat',   # KVM on-prem
+        ]
+        for pattern in onprem_mfr_patterns:
+            if pattern in mfr_lower:
+                return False
+
+    # --- Fallback: sensor_tags ---
+    try:
+        if isinstance(tags, str):
+            tags_list = json.loads(tags) if tags else []
+        elif isinstance(tags, list):
+            tags_list = tags
+        else:
+            tags_list = []
+    except Exception:
+        tags_list = []
+
+    cloud_tag_keywords = [
+        'aws', 'ec2', 'azure', 'gcp', 'google cloud',
+        'alibaba', 'aliyun', 'oracle cloud', 'oci',
+        'huawei cloud', 'tencent cloud', 'volcengine',
+        'cloud', 'vm',
+    ]
+    tags_lower = [str(t).lower() for t in tags_list]
+    for tag in tags_lower:
+        if any(kw in tag for kw in cloud_tag_keywords):
+            return True
+
+    return False
+
+
 def classify_cloud_provider(hostname, platform_name, tags):
     """Classify cloud provider based on hostname patterns, platform, and tags.
 

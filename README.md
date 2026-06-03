@@ -1,9 +1,25 @@
 # Falcon Sensor Billing Tool
 
-Collect CrowdStrike Falcon sensor data via NGSIEM event search and calculate 28-day rolling averages for FCS licensing and tag-based cost allocation.
+Collect CrowdStrike Falcon sensor counts via NGSIEM event search, classify hosts by
+license type, and calculate 28-day rolling averages for FCS/EPP/FCSC/FMC licensing.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+
+---
+
+## License Types
+
+| Type | Name | What it covers |
+|------|------|---------------|
+| **FCS** | Falcon Cloud Security | Cloud VMs — AWS EC2, Azure VM, GCP Compute, Alibaba ECS, etc. |
+| **EPP** | Endpoint Protection | On-prem servers, physical machines, endpoints |
+| **FCSC** | Container Security (hosts) | Hosts running OCI containers (`OciContainerStarted` events, not pods) |
+| **FMC** | Falcon Managed Containers | Kubernetes pods (`SensorHeartbeat` with `ProductType=Pod`) |
+
+**Total sensors = FCS + EPP + FCSC + FMC**
+
+---
 
 ## Quick Start
 
@@ -13,111 +29,189 @@ export FALCON_CLIENT_ID='your_client_id'
 export FALCON_CLIENT_SECRET='your_client_secret'
 export FALCON_CLOUD_REGION='us-1'  # or us-2, eu-1, us-gov-1
 
-# Collect current hour
-falcon-billing collect --days 0
+# Step 1: Collect hourly counts (current hour)
+falcon-billing collect
 
-# Start dashboard and open http://127.0.0.1:8080
+# Step 2: Backfill 28 days to build a full rolling average
+falcon-billing collect --days 28
+
+# Step 3: Query the summary (reads from local DB — no API call needed)
+falcon-billing query
+
+# Step 4: See per-hour breakdown
+falcon-billing query --hourly
+
+# Step 5: Start the dashboard
 falcon-billing dashboard
+# → http://127.0.0.1:8080
 ```
 
-Or use the all-in-one script:
+Or use the all-in-one script (dashboard + background collection every 4h):
 
 ```bash
-./run.sh                    # dashboard + collect every 4h
+./run.sh                    # collect every 4h
 ./run.sh --interval 2       # collect every 2h
 ```
 
-**API Scopes Required:**
+---
 
-| Scope | Falcon Console Name | Used By | Required |
-|-------|-------------------|---------|----------|
-| `devices:read` | Host Management: Read | `collect` — device query and details | Yes |
-| `humio-auth-proxy:write` | Event Search: Write | `collect` — NGSIEM query job submission | Yes |
-| `humio-auth-proxy:read` | Event Search: Read | `collect` — NGSIEM query job status polling | Yes |
-| `sensor-installers:read` | Sensor Download: Read | `collect` — CID auto-detection (optional, falls back to Hosts API) | No |
-| `sensor-usage-api:read` | Sensor Usage API: Read | `query`, `verify` — official billing numbers | No (only for `query`/`verify` commands) |
-| `mssp:read` | Flight Control: Read | `multi-tenant` — child CID discovery | No (only for MSSP/Flight Control) |
+## API Scopes Required
+
+| Scope | Falcon Console Name | Required |
+|-------|-------------------|----------|
+| `devices:read` | Host Management: Read | **Yes** — device query and host metadata (classification) |
+| `humio-auth-proxy:write` | Event Search: Write | **Yes** — submit NGSIEM query jobs |
+| `humio-auth-proxy:read` | Event Search: Read | **Yes** — poll NGSIEM query job results |
+| `sensor-installers:read` | Sensor Download: Read | No — CID auto-detection (falls back to Hosts API if absent) |
+| `sensor-usage-api:read` | Sensor Usage API: Read | No — only for `multi-tenant` command |
+| `mssp:read` | Flight Control: Read | No — child CID discovery for `multi-tenant` command only |
+
+> **The `query`, `verify`, `tag-report`, and `prune` commands read exclusively from the local SQLite database. No API call is made.**
+
+---
 
 ## How It Works
 
-1. **NGSIEM event search** queries heartbeat events to find all sensors active in each clock hour
-2. **Hosts API** enriches each sensor with hostname, platform, tags, and cloud metadata
-3. **SQLite database** stores hourly sensor logs and pre-aggregated tag counts
-4. **28-day rolling average** = SUM(hourly unique sensor counts) / hours collected
-5. **Dashboard** displays per-CID and per-tag license requirements
-
-## Installation
-
-### From Binary (macOS ARM64)
-
-Download from [Releases](https://github.com/yannhowe/falcon-sensor-billing-tool/releases):
-
-```bash
-chmod +x falcon-billing
-./falcon-billing --help
+```
+NGSIEM (LogScale)
+    │
+    │  1. Submit hourly query job for each clock hour
+    │     - Total active sensors (SensorHeartbeat, NOT pods)
+    │     - Container hosts (OciContainerStarted / OciContainerTelemetry)
+    │     - Pods / FMC (SensorHeartbeat with ProductType=Pod)
+    ▼
+  AIDs (FCS+EPP set, FCSC set, FMC set)
+    │
+    │  2. Hosts API enrichment
+    │     For the FCS+EPP set, fetch system_manufacturer (DMI) and
+    │     cloud_provider (IMDS) for each AID
+    ▼
+  Host classification  (see "Classification" below)
+    │
+    │  3. Per-hour counts → SQLite
+    │     hourly_counts: unique_sensor_count, fcs_count, epp_count,
+    │                    fcsc_count (FCSC), fmc_count
+    ▼
+  SQLite (sensor_billing.db)
+    │
+    │  4. 28-day rolling average
+    │     SUM(hourly counts over 672 hours) / 672
+    ▼
+  falcon-billing query  /  dashboard
 ```
 
-### From Source
+### Classification
 
-```bash
-pip install -r requirements.txt
-python -m falcon_billing.cli.main --help
-```
+Hosts in the NGSIEM anti-join (SensorHeartbeat, not pod, not OCI events) are
+either FCS (cloud VMs) or EPP (on-prem/physical). Classification uses:
 
-### Build Binary
+| Priority | Field | Source | Example values |
+|----------|-------|--------|---------------|
+| 1 (highest) | `cloud_provider` | IMDS auto-detected | `aws`, `azure`, `gcp`, `oci`, `alibaba`, `huawei`, `tencent`, `volcengine` |
+| 2 | `system_manufacturer` | DMI string | `Amazon EC2`, `Microsoft Corporation`, `Google`, `Alibaba Cloud` |
+| 3 (fallback) | `sensor_tags` | User-applied | Tags containing `aws`, `azure`, `gcp`, etc. |
 
-```bash
-pip install pyinstaller
-pyinstaller --clean falcon_billing.spec
-# Output: dist/falcon-billing
-```
+**Note:** Tag-based classification is a fallback only. Tags are user-applied and can
+be wrong (e.g. VMs tagged with a cloud provider they were migrated from).
+
+If none of the three signals indicate a cloud VM, the host is classified as **EPP**.
+
+---
 
 ## CLI Commands
 
-| Command | Description |
-|---------|-------------|
-| `collect` | Collect sensor data from NGSIEM + Hosts API |
-| `query` | Query Sensor Usage API for official billing numbers |
-| `multi-tenant` | Multi-tenant chargeback report |
-| `tag-report` | Per-tag host/license count via NGSIEM |
-| `verify` | Compare calculated vs API billing averages |
-| `prune` | Remove old data from database |
-| `dashboard` | Start the web dashboard |
+```
+falcon-billing collect      Collect sensor data from NGSIEM + Hosts API
+falcon-billing query        Show 28-day averages from local DB (no API call)
+falcon-billing multi-tenant Multi-tenant chargeback report via Sensor Usage API
+falcon-billing tag-report   Per-tag host/license count via NGSIEM
+falcon-billing verify       Compare local averages vs Sensor Usage API
+falcon-billing prune        Remove old data from database
+falcon-billing dashboard    Start the web dashboard
+```
+
+### `collect`
 
 ```bash
-# Current hour only
-falcon-billing collect --days 0
-
-# Backfill last 7 days
-falcon-billing collect --days 7
-
-# Collect and auto-prune old data
-falcon-billing collect --days 0 --prune
+falcon-billing collect                    # current hour only
+falcon-billing collect --days 28          # backfill last 28 days
+falcon-billing collect --days 7 --prune   # backfill + auto-prune
+falcon-billing collect --workers 20       # faster parallel backfill (default: 10)
 ```
+
+Collects data from NGSIEM and classifies each sensor. Stores per-hour counts in the database.
+
+### `query`
+
+```bash
+falcon-billing query              # 28-day summary (FCS / EPP / FCSC / FMC)
+falcon-billing query --hourly     # per-hour breakdown table
+falcon-billing query --output /tmp/results   # write CSV + JSON to directory
+```
+
+Reads **only** from the local SQLite database. No Falcon API call is made.
+
+**Sample output:**
+
+```
+======================================================================
+USAGE SUMMARY (from local NGSIEM data)
+======================================================================
+
+CID:    ABCDEF1234567890ABCDEF1234567890-XX
+Period: 2026-05-06 00:00:00 → 2026-06-03 00:00:00
+Data:   672/672 hours (100.0% coverage)
+
+28-day rolling averages:
+  Total Sensors:    247.54
+  FCS (Cloud VMs):  198.20
+  EPP (Endpoints):   22.11
+  FCSC (Cont Hosts): 18.43
+  FMC (Pods):         8.80
+
+CHARGEBACK BREAKDOWN:
+  FCS licenses:     198.20
+  FCSC licenses:     18.43
+  FMC licenses:       8.80
+```
+
+**Per-hour breakdown** (`--hourly`):
+
+```
+Per-hour breakdown (672 hours):
+  Hour                   Total     FCS    FCSC     FMC     EPP
+  -------------------- ------- ------- ------- ------- -------
+  2026-05-06 00:00:00      245     196      18       9      22
+  2026-05-06 01:00:00      248     200      18       8      22
+  ...
+```
+
+### `prune`
+
+```bash
+falcon-billing prune                      # delete data older than 395 days
+falcon-billing prune --retain-days 90     # keep only last 90 days
+falcon-billing prune --dry-run            # preview without deleting
+```
+
+---
 
 ## Dashboard
 
-The FCS Licensing dashboard at `http://127.0.0.1:8080` shows:
+The dashboard at `http://127.0.0.1:8080` shows:
 
-- **Overall licensing summary** — 28-day avg, peak hourly, hours collected
+- **Licensing summary** — 28-day avg FCS / EPP / FCSC / FMC, peak hourly, coverage
 - **Per-CID breakdown** — licenses required per child CID
-- **Per-tag breakdown** — cost allocation by FalconGroupingTags / SensorGroupingTags
-- **Filtering and sorting** on all tables
-- **CSV export** for CID and tag data
-
-Tag totals will exceed CID totals because hosts with multiple tags are counted in each tag. Use tags for cost allocation, not total license count.
+- **Per-tag breakdown** — cost allocation by SensorGroupingTags / FalconGroupingTags
+- **Hourly trend charts**
+- **CSV export** for CID and tag tables
 
 ### API Key Authentication
-
-Set `DASHBOARD_API_KEY` to protect all `/api/*` endpoints:
 
 ```bash
 export DASHBOARD_API_KEY='your-secret-key'
 falcon-billing dashboard
 ```
-
-- **Browser:** enter the key in the popup modal on first visit (stored in localStorage)
-- **curl:** pass via header or query param:
 
 ```bash
 # Header (preferred)
@@ -129,99 +223,124 @@ curl -s "http://127.0.0.1:8080/api/fcs/export?type=tag&api_key=your-secret-key" 
 
 When `DASHBOARD_API_KEY` is not set, auth is disabled (all endpoints open).
 
-## CSV Export
+---
 
-Export from the dashboard UI via **Export CSV** buttons, or from the command line:
+## CSV Output
 
-```bash
-# By tag
-curl -s "http://127.0.0.1:8080/api/fcs/export?type=tag" -o fcs_tags.csv
-
-# By CID
-curl -s "http://127.0.0.1:8080/api/fcs/export?type=cid" -o fcs_cids.csv
-```
-
-### Sample Output — By CID
+### Weekly summary (`query` default)
 
 ```csv
-cid,28day_avg,max_hourly,min_hourly,hours_collected,licenses_required
-5DDB0407BEF249C19C7A975F17979A1F-90,247.54,275,0,312,248
+period_start,period_end,period_days,hours_with_data,avg_total,avg_fcs,avg_fcsc,avg_fmc,avg_epp,retrieved_at
+2026-05-06 00:00:00,2026-06-03 00:00:00,28,672,247.54,198.20,18.43,8.80,22.11,2026-06-03T12:00:00
 ```
 
-### Sample Output — By Tag
+### Hourly breakdown (`query --hourly`)
 
 ```csv
-tag,28day_avg,max_hourly,hours_active,allocation_units
-FalconGroupingTags/KGTestBulkTag,59.81,65,310,60
-FalconGroupingTags/Linux86,50.74,52,310,51
-FalconGroupingTags/SVCSDEPLOY-TEST,44.80,47,310,45
+hour_timestamp,unique_sensor_count,fcs_count,fcsc_count,fmc_count,epp_count
+2026-05-06 00:00:00,245,196,18,9,22
+2026-05-06 01:00:00,248,200,18,8,22
 ```
 
-| Column | Description |
-|--------|-------------|
-| `28day_avg` | Average unique sensors per hour over the collection window |
-| `max_hourly` | Peak sensors seen in any single hour |
-| `hours_active` / `hours_collected` | Hours with data in the 28-day window |
-| `allocation_units` / `licenses_required` | `ceil(28day_avg)` — licenses needed |
+### Tag report (`tag-report`)
+
+```csv
+tag,unique_hosts,28day_avg_licenses,percentage
+SensorGroupingTag/prod,59,59,23.9%
+SensorGroupingTag/staging,44,44,17.8%
+(untagged),22,22,8.9%
+```
+
+---
 
 ## Configuration
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `FALCON_CLIENT_ID` | Yes | — | API client ID |
-| `FALCON_CLIENT_SECRET` | Yes | — | API client secret |
+| `FALCON_CLIENT_ID` | Yes* | — | API client ID |
+| `FALCON_CLIENT_SECRET` | Yes* | — | API client secret |
 | `FALCON_CLOUD_REGION` | No | `us-1` | `us-1`, `us-2`, `eu-1`, `us-gov-1` |
 | `FALCON_BILLING_DB` | No | `./sensor_billing.db` | Database path |
-| `DASHBOARD_API_KEY` | No | — | API key for dashboard (disabled if unset) |
+| `DASHBOARD_API_KEY` | No | — | Protect dashboard API (disabled if unset) |
 
-## NGSIEM Query
+\* Or configure a macOS Keychain profile via the `/cid` skill (see below).
 
-The tool queries CrowdStrike NG-SIEM (LogScale) directly via the Humio API to find all sensors active in each clock hour.
+### Keychain Credentials (macOS)
 
-**Endpoint:**
-```
-POST https://api.crowdstrike.com/humio/api/v1/repositories/search-all/queryjobs
-```
-Region variants: `api.us-2.crowdstrike.com`, `api.eu-1.crowdstrike.com`, `api.laggar.gcw.crowdstrike.com`
-
-**Required scope:** `ngsiem:read`
-
-**Query:**
-```
-#event_simpleName=AgentOnline OR #event_simpleName=ProcessRollup2 OR #event_simpleName=UserLogon
-| groupBy(aid, function=count())
-| select([aid])
+```bash
+# Store credentials in Keychain — no env vars needed
+security add-generic-password -s "falcon-client-id" -a "my_cid" -w "CLIENT_ID" -U
+security add-generic-password -s "falcon-client-secret" -a "my_cid" -w "CLIENT_SECRET" -U
+security add-generic-password -s "falcon-cloud-region" -a "my_cid" -w "us-1" -U
+echo "my_cid" > ~/.falcon_profile
 ```
 
-**Request body:**
-```json
-{
-  "queryString": "<query above>",
-  "start": 1746399600000,
-  "end":   1746403200000,
-  "isLive": false
-}
+---
+
+## NGSIEM Queries
+
+Three queries run per clock hour:
+
+**Total active sensors + FCS/EPP set** (anti-join: no pods, no OCI events):
 ```
-`start` and `end` are milliseconds since epoch (UTC). Submit the job, then poll `GET {endpoint}/{job_id}` until `done` is `true`.
+#event_simpleName=SensorHeartbeat ProductType!=Pod
+| selfJoinFilter(aid, where=[
+    {NOT #event_simpleName=OciContainerStarted},
+    {NOT #event_simpleName=OciContainerTelemetry}
+  ], prefilter=#event_simpleName=/SensorHeartbeat|OciContainer/)
+| groupBy(aid)
+```
 
-**Validated behaviour:**
-- Active window → `done: true`, `events: [{aid: ...}, ...]`
-- Empty/past window → `done: true`, `events: []` — **no error, no cancelled flag**
-- The tool logs `NGSIEM query complete: found N unique sensors` on both outcomes
+**Container hosts (FCSC)** — AIDs with OCI container events, not pods:
+```
+#event_simpleName=OciContainerStarted OR #event_simpleName=OciContainerTelemetry
+| selfJoinFilter(aid, where=[{#event_simpleName=SensorHeartbeat ProductType!=Pod}],
+    prefilter=#event_simpleName=SensorHeartbeat)
+| groupBy(aid)
+```
 
-To test the query manually, run `falcon-billing collect --days 0 --verbose` and inspect the logs.
+**Pods (FMC)**:
+```
+#event_simpleName=SensorHeartbeat ProductType=Pod
+| groupBy(aid)
+```
+
+Each query runs as an async job: `POST /humio/api/v1/repositories/search-all/queryjobs`,
+then `GET {endpoint}/{job_id}` until `done: true`.
+
+---
+
+## Installation
+
+### From Source
+
+```bash
+git clone <repo>
+pip install -r requirements.txt
+python -m falcon_billing.cli.main --help
+```
+
+### Build Binary (macOS ARM64)
+
+```bash
+pip install pyinstaller
+pyinstaller --clean falcon_billing.spec
+# Output: dist/falcon-billing
+```
+
+---
 
 ## Project Structure
 
 ```
 falcon_billing/
-  billing.py          # Sensor Usage API queries
-  classifier.py       # Product type classification (FCS/FCSC/FMC/EPP)
-  collector.py        # NGSIEM + Hosts API data collection
-  credentials.py      # Credential loading (env vars / macOS Keychain)
-  database.py         # SQLite schema and operations
-  ngsiem.py           # NGSIEM event search with retry
-  cli/main.py         # CLI entry point with subcommands
+  billing.py          # Sensor Usage API queries (multi-tenant command)
+  classifier.py       # Host classification: is_cloud_vm(), classify_sensor()
+  collector.py        # NGSIEM queries + Hosts API enrichment + DB writes
+  credentials.py      # Credential loading (env vars → Keychain)
+  database.py         # SQLite schema, migrations, hourly counts, 28-day average
+  ngsiem.py           # NGSIEM query job submission and polling
+  cli/main.py         # CLI entry point (subcommands)
   web/
     app.py            # Flask dashboard
     auth.py           # API key authentication
@@ -232,14 +351,17 @@ falcon_billing.spec   # PyInstaller build spec
 run.sh                # Dashboard + periodic collection script
 ```
 
+---
+
 ## Security
 
-- Credentials from environment variables only (never hardcoded)
+- Credentials from environment variables or macOS Keychain (never hardcoded)
 - Constant-time API key comparison (`hmac.compare_digest`)
 - Parameterized SQL queries throughout
 - CSV exports sanitized against formula injection
-- CDN scripts include Subresource Integrity hashes
 - Dashboard binds to `127.0.0.1` only
+
+---
 
 ## License
 

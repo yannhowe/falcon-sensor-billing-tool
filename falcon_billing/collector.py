@@ -16,7 +16,13 @@ from falconpy import Hosts, OAuth2
 
 from falcon_billing.credentials import load_credentials
 from falcon_billing.database import BillingDatabase
-from falcon_billing.ngsiem import query_ngsiem_for_sensors, NgsiemQueryFailed
+from falcon_billing.ngsiem import (
+    query_ngsiem_for_sensors,
+    query_ngsiem_for_fcs,
+    query_ngsiem_for_container_hosts,
+    query_ngsiem_for_fmc,
+    NgsiemQueryFailed,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -261,7 +267,9 @@ def enrich_sensors_with_host_details(
                         'last_seen': resource.get('last_seen'),
                         'groups': resource.get('groups', []),
                         'tags': resource.get('tags', []),
-                        'cid': resource.get('cid', 'default')
+                        'cid': resource.get('cid', 'default'),
+                        'manufacturer': resource.get('system_manufacturer'),
+                        'cloud_provider': resource.get('cloud_provider'),
                     }
                     host_details.append(host_data)
                     enriched[host_data['sensor_id']] = host_data
@@ -354,10 +362,82 @@ def process_hourly_collection(
 
     logger.info(f"Found {len(sensor_ids)} unique sensors for hour {hour_str}")
 
+    # Query FCSC — OCI container runtime hosts, ProductType!=Pod
+    fcsc_count = None
+    try:
+        creds = load_credentials()
+        container_ids = query_ngsiem_for_container_hosts(
+            hour_start=hour_start_iso, hour_end=hour_end_iso, cid=cid,
+            client_id=creds["client_id"], client_secret=creds["client_secret"],
+            cloud_region=creds["cloud_region"],
+        )
+        fcsc_count = len(container_ids)
+        logger.info(f"FCSC (container hosts): {fcsc_count} for hour {hour_str}")
+    except NgsiemQueryFailed:
+        logger.warning("FCSC query failed, fcsc_count will be NULL")
+
+    # Query FMC — pod sensors, ProductType=Pod
+    fmc_count = None
+    try:
+        creds = load_credentials()
+        fmc_ids = query_ngsiem_for_fmc(
+            hour_start=hour_start_iso, hour_end=hour_end_iso, cid=cid,
+            client_id=creds["client_id"], client_secret=creds["client_secret"],
+            cloud_region=creds["cloud_region"],
+        )
+        fmc_count = len(fmc_ids)
+        logger.info(f"FMC (pod sensors): {fmc_count} for hour {hour_str}")
+    except NgsiemQueryFailed:
+        logger.warning("FMC query failed, fmc_count will be NULL")
+
+    # Query FCS — SensorHeartbeat, not pod, !join to exclude OCI hosts
+    fcs_ids = None
+    fcs_count = None
+    try:
+        creds = load_credentials()
+        fcs_ids = query_ngsiem_for_fcs(
+            hour_start=hour_start_iso, hour_end=hour_end_iso, cid=cid,
+            client_id=creds["client_id"], client_secret=creds["client_secret"],
+            cloud_region=creds["cloud_region"],
+        )
+        fcs_count = len(fcs_ids)
+        logger.info(f"FCS (raw, before classification): {fcs_count} for hour {hour_str}")
+    except NgsiemQueryFailed:
+        logger.warning("FCS query failed, fcs_count will be NULL")
+
     # Step 2: Enrich with host metadata (smart caching)
     if falcon_client is None:
         falcon_client = get_falcon_client()
     enriched = enrich_sensors_with_host_details(falcon_client, db, sensor_ids)
+
+    # Classify fcs_ids into FCS (cloud VMs) vs EPP (on-prem endpoints)
+    from falcon_billing.classifier import is_cloud_vm
+    fcs_final = None
+    epp_count = None
+    if fcs_ids is not None:
+        fcs_final = 0
+        epp_count = 0
+        for aid in fcs_ids:
+            meta = enriched.get(aid, {})
+            if is_cloud_vm(
+                manufacturer=meta.get('manufacturer'),
+                cloud_provider=meta.get('cloud_provider'),
+                tags=meta.get('tags'),
+            ):
+                fcs_final += 1
+            else:
+                epp_count += 1
+        fcs_count = fcs_final
+        logger.info(f"FCS (cloud VMs): {fcs_final}, EPP (endpoints): {epp_count} for hour {hour_str}")
+
+    # Tally check
+    if all(v is not None for v in [fcsc_count, fmc_count, fcs_final, epp_count]):
+        tally = fcs_final + epp_count + fcsc_count + fmc_count
+        total = len(sensor_ids)
+        if tally == total:
+            logger.info(f"Tally OK: FCS({fcs_final}) + EPP({epp_count}) + FCSC({fcsc_count}) + FMC({fmc_count}) = {tally} == Total({total})")
+        else:
+            logger.warning(f"Tally MISMATCH: FCS({fcs_final}) + EPP({epp_count}) + FCSC({fcsc_count}) + FMC({fmc_count}) = {tally} != Total({total})")
 
     # Calculate cache metrics
     cache_hits, cache_misses, hit_rate = db.cache_hit_rate(sensor_ids, max_age_hours=24)
@@ -389,8 +469,8 @@ def process_hourly_collection(
 
     # Step 4: Calculate and store hourly count
     unique_count = len(sensor_ids)
-    db.insert_hourly_count(hour_str, cid, unique_count)
-    logger.info(f"Stored hourly count: {unique_count} sensors")
+    db.insert_hourly_count(hour_str, cid, unique_count, fcsc_count, fmc_count, fcs_count, epp_count)
+    logger.info(f"Stored hourly count: Total={unique_count}, FCS={fcs_count}, EPP={epp_count}, FCSC={fcsc_count}, FMC={fmc_count}")
 
     # Step 5: Aggregate tag counts
     db.aggregate_tag_counts(hour_str, cid)
@@ -404,10 +484,11 @@ def fetch_hour_sensors(
     hour: datetime,
     cid: str,
     falcon_client,
-) -> Tuple[datetime, str, List[str]]:
+) -> Tuple[datetime, str, List[str], Optional[List[str]], Optional[List[str]], Optional[List[str]]]:
     """
-    Query NGSIEM (or Hosts API fallback) for a single hour. No DB interaction.
-    Returns (hour, resolved_cid, sensor_ids) so results can be stored later.
+    Query all 4 NGSIEM queries for a single hour. No DB interaction.
+    Returns (hour, resolved_cid, sensor_ids, fcsc_ids, fmc_ids, fcs_ids).
+    Individual lists are None if that query failed.
     """
     from falcon_billing.credentials import load_credentials
 
@@ -418,21 +499,55 @@ def fetch_hour_sensors(
     hour_start_iso = hour.strftime('%Y-%m-%dT%H:%M:%SZ')
     hour_end_iso = hour_end.strftime('%Y-%m-%dT%H:%M:%SZ')
 
+    # Q1: Total
     try:
         creds = load_credentials()
         sensor_ids = query_ngsiem_for_sensors(
-            hour_start=hour_start_iso,
-            hour_end=hour_end_iso,
-            cid=cid,
-            client_id=creds["client_id"],
-            client_secret=creds["client_secret"],
+            hour_start=hour_start_iso, hour_end=hour_end_iso, cid=cid,
+            client_id=creds["client_id"], client_secret=creds["client_secret"],
             cloud_region=creds["cloud_region"],
         )
     except NgsiemQueryFailed:
-        logger.warning("NGSIEM failed for %s, falling back to Hosts API", hour_start_iso)
+        logger.warning("NGSIEM total query failed for %s, falling back to Hosts API", hour_start_iso)
         sensor_ids = query_hosts_api_for_active_sensors(falcon_client, hour, hour_end, cid)
 
-    return hour, cid, sensor_ids
+    # Q2: FCSC
+    fcsc_ids = None
+    try:
+        creds = load_credentials()
+        fcsc_ids = query_ngsiem_for_container_hosts(
+            hour_start=hour_start_iso, hour_end=hour_end_iso, cid=cid,
+            client_id=creds["client_id"], client_secret=creds["client_secret"],
+            cloud_region=creds["cloud_region"],
+        )
+    except NgsiemQueryFailed:
+        logger.warning("FCSC query failed for %s", hour_start_iso)
+
+    # Q3: FMC
+    fmc_ids = None
+    try:
+        creds = load_credentials()
+        fmc_ids = query_ngsiem_for_fmc(
+            hour_start=hour_start_iso, hour_end=hour_end_iso, cid=cid,
+            client_id=creds["client_id"], client_secret=creds["client_secret"],
+            cloud_region=creds["cloud_region"],
+        )
+    except NgsiemQueryFailed:
+        logger.warning("FMC query failed for %s", hour_start_iso)
+
+    # Q4: FCS
+    fcs_ids = None
+    try:
+        creds = load_credentials()
+        fcs_ids = query_ngsiem_for_fcs(
+            hour_start=hour_start_iso, hour_end=hour_end_iso, cid=cid,
+            client_id=creds["client_id"], client_secret=creds["client_secret"],
+            cloud_region=creds["cloud_region"],
+        )
+    except NgsiemQueryFailed:
+        logger.warning("FCS query failed for %s", hour_start_iso)
+
+    return hour, cid, sensor_ids, fcsc_ids, fmc_ids, fcs_ids
 
 
 def store_hour_data(
@@ -441,16 +556,21 @@ def store_hour_data(
     cid: str,
     sensor_ids: List[str],
     falcon_client,
+    fcsc_ids: Optional[List[str]] = None,
+    fmc_ids: Optional[List[str]] = None,
+    fcs_ids: Optional[List[str]] = None,
 ) -> Tuple[int, int, int]:
-    """
-    Store pre-fetched sensor IDs for a single hour. Handles enrichment and all DB writes.
-    Returns (unique_count, cache_hits, api_calls).
-    """
+    """Store pre-fetched sensor IDs for a single hour. Returns (unique_count, cache_hits, api_calls)."""
+    from falcon_billing.classifier import is_cloud_vm
+
     hour_str = hour.strftime('%Y-%m-%d %H:00:00')
+
+    fcsc_count = len(fcsc_ids) if fcsc_ids is not None else None
+    fmc_count = len(fmc_ids) if fmc_ids is not None else None
 
     if not sensor_ids:
         logger.warning("No sensors found for hour %s", hour_str)
-        db.insert_hourly_count(hour_str, cid, 0)
+        db.insert_hourly_count(hour_str, cid, 0, fcsc_count, fmc_count, None, None)
         return 0, 0, 0
 
     enriched = enrich_sensors_with_host_details(falcon_client, db, sensor_ids)
@@ -470,9 +590,35 @@ def store_hour_data(
 
     db.insert_sensor_logs(hour_str, sensors_to_insert, cid)
     unique_count = len(sensor_ids)
-    db.insert_hourly_count(hour_str, cid, unique_count)
+
+    # Classify fcs_ids into FCS (cloud VMs) vs EPP (on-prem endpoints)
+    fcs_final = None
+    epp_count = None
+    if fcs_ids is not None:
+        fcs_final = 0
+        epp_count = 0
+        for aid in fcs_ids:
+            meta = enriched.get(aid, {})
+            if is_cloud_vm(
+                manufacturer=meta.get('manufacturer'),
+                cloud_provider=meta.get('cloud_provider'),
+                tags=meta.get('tags'),
+            ):
+                fcs_final += 1
+            else:
+                epp_count += 1
+
+    db.insert_hourly_count(hour_str, cid, unique_count, fcsc_count, fmc_count, fcs_final, epp_count)
     db.aggregate_tag_counts(hour_str, cid)
-    logger.info("Stored hourly count: %d sensors for %s", unique_count, hour_str)
+
+    if all(v is not None for v in [fcs_final, epp_count, fcsc_count, fmc_count]):
+        tally = fcs_final + epp_count + fcsc_count + fmc_count
+        if tally == unique_count:
+            logger.info("Tally OK: FCS(%d) + EPP(%d) + FCSC(%d) + FMC(%d) = %d == Total(%d)",
+                        fcs_final, epp_count, fcsc_count, fmc_count, tally, unique_count)
+        else:
+            logger.warning("Tally MISMATCH: FCS(%d) + EPP(%d) + FCSC(%d) + FMC(%d) = %d != Total(%d)",
+                           fcs_final, epp_count, fcsc_count, fmc_count, tally, unique_count)
 
     return unique_count, cache_hits, cache_misses
 
@@ -504,8 +650,8 @@ def parallel_backfill(
             hour = future_to_hour[future]
             completed += 1
             try:
-                _, resolved_cid, sensor_ids = future.result()
-                results[hour] = (resolved_cid, sensor_ids)
+                _, resolved_cid, sensor_ids, fcsc_ids, fmc_ids, fcs_ids = future.result()
+                results[hour] = (resolved_cid, sensor_ids, fcsc_ids, fmc_ids, fcs_ids)
             except Exception as exc:
                 logger.error("Fetch failed for %s: %s", hour, exc)
                 errors[hour] = exc
@@ -518,8 +664,8 @@ def parallel_backfill(
     # Phase 2: store sequentially in chronological order
     logger.info("Storing %d hours to database...", len(results))
     for i, hour in enumerate(sorted(results.keys()), 1):
-        resolved_cid, sensor_ids = results[hour]
-        store_hour_data(db, hour, resolved_cid, sensor_ids, falcon_client)
+        resolved_cid, sensor_ids, fcsc_ids, fmc_ids, fcs_ids = results[hour]
+        store_hour_data(db, hour, resolved_cid, sensor_ids, falcon_client, fcsc_ids, fmc_ids, fcs_ids)
         if i % 24 == 0:
             logger.info("Stored %d/%d hours", i, len(results))
 
@@ -545,7 +691,7 @@ def verify_billing_accuracy(
         tuple: (calculated_avg, api_avg, diff_pct, passed)
     """
     # Calculate 28-day average from hourly_counts
-    calculated_avg = db.calculate_28day_average(cid)
+    calculated_avg = db.calculate_28day_average(cid)["averages"]["total"]
 
     # Query billing API data
     billing_data = db.get_billing_average(date, cid)
@@ -705,7 +851,7 @@ def get_falcon_cid() -> str:
     Caches the result to avoid repeated API calls.
 
     Returns:
-        str: CID in format "32hexchars-2charChecksum" (e.g., "5DDB0407BEF249C19C7A975F17979A1F-90")
+        str: CID in format "32hexchars-2charChecksum" (e.g., "ABCDEF1234567890ABCDEF1234567890-XX")
     """
     global _cached_cid
 

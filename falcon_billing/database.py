@@ -102,6 +102,18 @@ class BillingDatabase:
 
         self._migrate_add_detection_metadata()
         self._migrate_add_audit_log()
+        self._migrate_add_fcsc_count()
+        self._migrate_add_fmc_count()
+        self._migrate_add_fcs_count()
+        self._migrate_add_manufacturer_cloud_provider()
+        self._migrate_add_epp_count()
+
+        # After all migrations, ensure schema_version reflects current version
+        row = conn.execute("SELECT version FROM schema_version").fetchone()
+        if row and row["version"] != SCHEMA_VERSION:
+            conn.execute("UPDATE schema_version SET version = ?", (SCHEMA_VERSION,))
+            conn.commit()
+            logger.info("Schema version updated to %d", SCHEMA_VERSION)
 
     def _migrate_add_detection_metadata(self):
         """Add detection_metadata column to host_metadata_cache if it doesn't exist."""
@@ -140,6 +152,80 @@ class BillingDatabase:
             "CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_log(action)"
         )
         conn.commit()
+
+    def _migrate_add_fcsc_count(self):
+        """Add fcsc_count column to hourly_counts if it doesn't exist.
+
+        Handles rename from old 'container_host_count' name.
+        """
+        conn = self.get_connection()
+        cursor = conn.execute("PRAGMA table_info(hourly_counts)")
+        columns = [row[1] for row in cursor.fetchall()]
+        if "fcsc_count" not in columns and "container_host_count" in columns:
+            logger.info("Renaming container_host_count → fcsc_count in hourly_counts...")
+            conn.execute("ALTER TABLE hourly_counts RENAME COLUMN container_host_count TO fcsc_count")
+            conn.commit()
+            logger.info("Migration complete: container_host_count renamed to fcsc_count")
+        elif "fcsc_count" not in columns:
+            logger.info("Adding fcsc_count column to hourly_counts...")
+            conn.execute("ALTER TABLE hourly_counts ADD COLUMN fcsc_count INTEGER")
+            conn.commit()
+            logger.info("Migration complete: fcsc_count added to hourly_counts")
+
+    def _migrate_add_fmc_count(self):
+        """Add fmc_count column to hourly_counts if it doesn't exist."""
+        conn = self.get_connection()
+        cursor = conn.execute("PRAGMA table_info(hourly_counts)")
+        columns = [row[1] for row in cursor.fetchall()]
+        if "fmc_count" not in columns:
+            logger.info("Adding fmc_count column to hourly_counts...")
+            conn.execute("ALTER TABLE hourly_counts ADD COLUMN fmc_count INTEGER")
+            conn.commit()
+            logger.info("Migration complete: fmc_count added to hourly_counts")
+
+    def _migrate_add_fcs_count(self):
+        """Add fcs_count column to hourly_counts if it doesn't exist."""
+        conn = self.get_connection()
+        cursor = conn.execute("PRAGMA table_info(hourly_counts)")
+        columns = [row[1] for row in cursor.fetchall()]
+        if "fcs_count" not in columns:
+            logger.info("Adding fcs_count column to hourly_counts...")
+            conn.execute("ALTER TABLE hourly_counts ADD COLUMN fcs_count INTEGER")
+            conn.commit()
+            logger.info("Migration complete: fcs_count added to hourly_counts")
+
+    def _migrate_add_manufacturer_cloud_provider(self):
+        """Add manufacturer and cloud_provider columns to host_metadata_cache if they don't exist."""
+        conn = self.get_connection()
+        cursor = conn.execute("PRAGMA table_info(host_metadata_cache)")
+        columns = [row[1] for row in cursor.fetchall()]
+        if "manufacturer" not in columns:
+            logger.info("Adding manufacturer column to host_metadata_cache...")
+            conn.execute("ALTER TABLE host_metadata_cache ADD COLUMN manufacturer TEXT")
+            conn.commit()
+            logger.info("Migration complete: manufacturer added to host_metadata_cache")
+        else:
+            logger.debug("manufacturer column already exists")
+        if "cloud_provider" not in columns:
+            logger.info("Adding cloud_provider column to host_metadata_cache...")
+            conn.execute("ALTER TABLE host_metadata_cache ADD COLUMN cloud_provider TEXT")
+            conn.commit()
+            logger.info("Migration complete: cloud_provider added to host_metadata_cache")
+        else:
+            logger.debug("cloud_provider column already exists")
+
+    def _migrate_add_epp_count(self):
+        """Add epp_count column to hourly_counts if it doesn't exist."""
+        conn = self.get_connection()
+        cursor = conn.execute("PRAGMA table_info(hourly_counts)")
+        columns = [row[1] for row in cursor.fetchall()]
+        if "epp_count" not in columns:
+            logger.info("Adding epp_count column to hourly_counts...")
+            conn.execute("ALTER TABLE hourly_counts ADD COLUMN epp_count INTEGER")
+            conn.commit()
+            logger.info("Migration complete: epp_count added to hourly_counts")
+        else:
+            logger.debug("epp_count column already exists")
 
     def _configure(self, conn: sqlite3.Connection):
         """Apply SQLite performance and reliability settings."""
@@ -233,7 +319,9 @@ class BillingDatabase:
                 cid TEXT,
                 last_updated TEXT NOT NULL,
                 last_seen TEXT,
-                detection_metadata TEXT
+                detection_metadata TEXT,
+                manufacturer TEXT,
+                cloud_provider TEXT
             )
         """)
         conn.execute(
@@ -315,6 +403,8 @@ class BillingDatabase:
         tags: str = None,
         cid: str = None,
         last_seen: str = None,
+        manufacturer: str = None,
+        cloud_provider: str = None,
     ):
         """
         Upsert a single host's metadata into the cache.
@@ -330,6 +420,8 @@ class BillingDatabase:
             tags: JSON-encoded list of tags
             cid: Child CID
             last_seen: Last-seen timestamp from the API
+            manufacturer: system_manufacturer DMI string from Hosts API
+            cloud_provider: cloud_provider IMDS field from Hosts API
 
         Note: detection_metadata is intentionally excluded from this upsert. It is a
         separate enrichment column populated after initial host discovery. Including it
@@ -341,8 +433,9 @@ class BillingDatabase:
             """
             INSERT INTO host_metadata_cache (
                 sensor_id, hostname, platform_name, platform_version,
-                os_version, status, groups, tags, cid, last_updated, last_seen
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                os_version, status, groups, tags, cid, last_updated, last_seen,
+                manufacturer, cloud_provider
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(sensor_id) DO UPDATE SET
                 hostname = excluded.hostname,
                 platform_name = excluded.platform_name,
@@ -353,7 +446,9 @@ class BillingDatabase:
                 tags = excluded.tags,
                 cid = excluded.cid,
                 last_updated = excluded.last_updated,
-                last_seen = excluded.last_seen
+                last_seen = excluded.last_seen,
+                manufacturer = excluded.manufacturer,
+                cloud_provider = excluded.cloud_provider
             """,
             (
                 sensor_id,
@@ -367,6 +462,8 @@ class BillingDatabase:
                 cid,
                 now,
                 last_seen,
+                manufacturer,
+                cloud_provider,
             ),
         )
         conn.commit()
@@ -387,8 +484,9 @@ class BillingDatabase:
                 """
                 INSERT INTO host_metadata_cache (
                     sensor_id, hostname, platform_name, platform_version,
-                    os_version, status, groups, tags, cid, last_updated, last_seen
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    os_version, status, groups, tags, cid, last_updated, last_seen,
+                    manufacturer, cloud_provider
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(sensor_id) DO UPDATE SET
                     hostname = excluded.hostname,
                     platform_name = excluded.platform_name,
@@ -399,7 +497,9 @@ class BillingDatabase:
                     tags = excluded.tags,
                     cid = excluded.cid,
                     last_updated = excluded.last_updated,
-                    last_seen = excluded.last_seen
+                    last_seen = excluded.last_seen,
+                    manufacturer = excluded.manufacturer,
+                    cloud_provider = excluded.cloud_provider
                 """,
                 (
                     host.get("sensor_id"),
@@ -413,6 +513,8 @@ class BillingDatabase:
                     host.get("cid"),
                     now,
                     host.get("last_seen"),
+                    host.get("manufacturer"),
+                    host.get("cloud_provider"),
                 ),
             )
         conn.commit()
@@ -583,7 +685,9 @@ class BillingDatabase:
     # ========================================================================
 
     def insert_hourly_count(
-        self, hour_timestamp: str, cid: str, count: int
+        self, hour_timestamp: str, cid: str, count: int,
+        fcsc_count: int = None, fmc_count: int = None, fcs_count: int = None,
+        epp_count: int = None
     ):
         """
         Insert aggregated sensor count for a specific hour.
@@ -591,17 +695,22 @@ class BillingDatabase:
         Args:
             hour_timestamp: Clock hour in UTC
             cid: Child CID or 'default'
-            count: Unique sensor count
+            count: Total unique sensor count (all SensorHeartbeat AIDs)
+            fcsc_count: FCSC — OCI events with ProductType!=Pod
+            fmc_count: FMC — SensorHeartbeat with ProductType=Pod
+            fcs_count: FCS — cloud VMs only (classified via manufacturer/cloud_provider)
+            epp_count: EPP — on-prem endpoints (fcs_ids minus cloud VMs)
         """
         conn = self.get_connection()
         now = datetime.now(timezone.utc).isoformat()
         conn.execute(
             """
             INSERT OR REPLACE INTO hourly_counts (
-                hour_timestamp, cid, unique_sensor_count, collected_at
-            ) VALUES (?, ?, ?, ?)
+                hour_timestamp, cid, unique_sensor_count,
+                fcsc_count, fmc_count, fcs_count, epp_count, collected_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (hour_timestamp, cid, count, now),
+            (hour_timestamp, cid, count, fcsc_count, fmc_count, fcs_count, epp_count, now),
         )
         conn.commit()
 
@@ -622,7 +731,12 @@ class BillingDatabase:
         conn = self.get_connection()
         rows = conn.execute(
             """
-            SELECT * FROM hourly_counts
+            SELECT hour_timestamp, cid, unique_sensor_count, collected_at,
+                   COALESCE(fcsc_count, 0) AS fcsc_count,
+                   COALESCE(fmc_count, 0) AS fmc_count,
+                   COALESCE(fcs_count, 0) AS fcs_count,
+                   COALESCE(epp_count, 0) AS epp_count
+            FROM hourly_counts
             WHERE hour_timestamp >= ? AND hour_timestamp <= ?
             AND cid = ?
             ORDER BY hour_timestamp
@@ -632,48 +746,83 @@ class BillingDatabase:
         return [dict(row) for row in rows]
 
     def calculate_28day_average(
-        self, cid: str = "default", tag: Optional[str] = None
-    ) -> float:
+        self, cid: str = "default", tag: Optional[str] = None, days: int = 28
+    ) -> dict:
         """
-        Calculate 28-day rolling average (672 hours) ending now.
+        Calculate rolling average (default 28 days / 672 hours) from hourly_counts.
+
+        Returns a dict with per-category averages (total, fcs, fcsc, fmc) and
+        metadata about the window and data coverage.
 
         Args:
             cid: Child CID or 'default'
-            tag: Optional tag for sub-CID billing
+            tag: Optional tag for sub-CID billing (total only; fcs/fcsc/fmc not tracked per-tag)
+            days: Rolling window in days (default 28)
 
         Returns:
-            float: Average sensor count over 672 hours
+            dict with keys: cid, period_days, period_hours, period_start, period_end,
+            hours_with_data, averages (total/fcs/fcsc/fmc)
         """
         now = datetime.now(timezone.utc)
-        # Align window to midnight so a full 28-day dataset (672 hours) always scores 100%
         end_dt = now
-        start_dt = datetime(now.year, now.month, now.day, tzinfo=timezone.utc) - timedelta(days=28)
+        start_dt = datetime(now.year, now.month, now.day, tzinfo=timezone.utc) - timedelta(days=days)
 
         start_hour = start_dt.strftime("%Y-%m-%d %H:%M:%S")
         end_hour = end_dt.strftime("%Y-%m-%d %H:%M:%S")
+        period_hours = days * 24
 
         conn = self.get_connection()
         if tag:
             row = conn.execute(
                 """
-                SELECT SUM(unique_sensor_count) as total FROM hourly_tag_counts
+                SELECT COUNT(*) as hours_with_data,
+                       SUM(unique_sensor_count) as total_sum
+                FROM hourly_tag_counts
                 WHERE hour_timestamp >= ? AND hour_timestamp <= ?
                 AND cid = ? AND tag = ?
                 """,
                 (start_hour, end_hour, cid, tag),
             ).fetchone()
-        else:
-            row = conn.execute(
-                """
-                SELECT SUM(unique_sensor_count) as total FROM hourly_counts
-                WHERE hour_timestamp >= ? AND hour_timestamp <= ?
-                AND cid = ?
-                """,
-                (start_hour, end_hour, cid),
-            ).fetchone()
+            total = (row["total_sum"] or 0) / period_hours
+            return {
+                "cid": cid,
+                "period_days": days,
+                "period_hours": period_hours,
+                "period_start": start_hour,
+                "period_end": end_hour,
+                "hours_with_data": row["hours_with_data"] or 0,
+                "averages": {"total": total, "fcs": 0.0, "fcsc": 0.0, "fmc": 0.0, "epp": 0.0},
+            }
 
-        total = row["total"] if row["total"] else 0
-        return total / 672.0  # 28 days * 24 hours = 672 hours
+        row = conn.execute(
+            """
+            SELECT COUNT(*) as hours_with_data,
+                   SUM(unique_sensor_count) as total_sum,
+                   SUM(COALESCE(fcs_count, 0)) as fcs_sum,
+                   SUM(COALESCE(fcsc_count, 0)) as fcsc_sum,
+                   SUM(COALESCE(fmc_count, 0)) as fmc_sum,
+                   SUM(COALESCE(epp_count, 0)) as epp_sum
+            FROM hourly_counts
+            WHERE hour_timestamp >= ? AND hour_timestamp <= ? AND cid = ?
+            """,
+            (start_hour, end_hour, cid),
+        ).fetchone()
+
+        return {
+            "cid": cid,
+            "period_days": days,
+            "period_hours": period_hours,
+            "period_start": start_hour,
+            "period_end": end_hour,
+            "hours_with_data": row["hours_with_data"] or 0,
+            "averages": {
+                "total": (row["total_sum"] or 0) / period_hours,
+                "fcs": (row["fcs_sum"] or 0) / period_hours,
+                "fcsc": (row["fcsc_sum"] or 0) / period_hours,
+                "fmc": (row["fmc_sum"] or 0) / period_hours,
+                "epp": (row["epp_sum"] or 0) / period_hours,
+            },
+        }
 
     # ========================================================================
     # Tag Counts Functions
