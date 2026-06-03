@@ -61,6 +61,14 @@ def create_app(db_path: str = None) -> Flask:
     def fcs_licensing():
         return render_template("fcs_licensing.html")
 
+    @app.route("/comparison")
+    def comparison():
+        return render_template("comparison.html")
+
+    @app.route("/methodology")
+    def methodology():
+        return render_template("methodology.html")
+
     # ----------------------------------------------------------------
     # FCS Licensing API routes
     # ----------------------------------------------------------------
@@ -88,6 +96,10 @@ def create_app(db_path: str = None) -> Flask:
             cid_cursor = conn.execute(
                 "SELECT cid, "
                 "SUM(unique_sensor_count) as total, "
+                "SUM(COALESCE(fcs_count, 0)) as fcs_total, "
+                "SUM(COALESCE(epp_count, 0)) as epp_total, "
+                "SUM(COALESCE(fcsc_count, 0)) as fcsc_total, "
+                "SUM(COALESCE(fmc_count, 0)) as fmc_total, "
                 "MAX(unique_sensor_count) as max_sensors, "
                 "MIN(unique_sensor_count) as min_sensors, "
                 "COUNT(*) as hours_collected "
@@ -102,9 +114,17 @@ def create_app(db_path: str = None) -> Flask:
 
             for row in cid_cursor.fetchall():
                 avg = row["total"] / collected_hours if collected_hours else 0
+                fcs_avg = row["fcs_total"] / collected_hours if collected_hours else 0
+                epp_avg = row["epp_total"] / collected_hours if collected_hours else 0
+                fcsc_avg = row["fcsc_total"] / collected_hours if collected_hours else 0
+                fmc_avg = row["fmc_total"] / collected_hours if collected_hours else 0
                 cids.append({
                     "cid": row["cid"],
                     "avg_sensors": round(avg, 2),
+                    "fcs_avg": round(fcs_avg, 2),
+                    "epp_avg": round(epp_avg, 2),
+                    "fcsc_avg": round(fcsc_avg, 2),
+                    "fmc_avg": round(fmc_avg, 2),
                     "max_sensors": row["max_sensors"],
                     "min_sensors": row["min_sensors"],
                     "hours_collected": row["hours_collected"],
@@ -170,6 +190,124 @@ def create_app(db_path: str = None) -> Flask:
             conn.close()
 
     # ----------------------------------------------------------------
+    # Licensing Comparison (EPP-only vs FCS split)
+    # ----------------------------------------------------------------
+
+    @app.route("/api/fcs/comparison")
+    @require_api_key
+    def api_fcs_comparison():
+        """Compare licensing: all-EPP (weekly avg) vs FCS split (hourly avg).
+
+        Shows the license savings from proper FCS/FCSC/FMC classification
+        versus billing everything as EPP.
+        """
+        conn = get_db()
+        try:
+            # --- Scenario B: FCS split (hourly averages, 28-day window) ---
+            target_hours = 672
+            cutoff_28d = (datetime.utcnow() - timedelta(hours=target_hours)).strftime(
+                "%Y-%m-%d %H:%M:%S"
+            )
+
+            hours_row = conn.execute(
+                "SELECT COUNT(DISTINCT hour_timestamp) as total_hours "
+                "FROM hourly_counts WHERE hour_timestamp >= ?",
+                (cutoff_28d,),
+            ).fetchone()
+            collected_hours_28d = hours_row["total_hours"] or 0
+
+            row_28d = conn.execute(
+                "SELECT "
+                "SUM(unique_sensor_count) as total, "
+                "SUM(COALESCE(fcs_count, 0)) as fcs_total, "
+                "SUM(COALESCE(epp_count, 0)) as epp_total, "
+                "SUM(COALESCE(fcsc_count, 0)) as fcsc_total, "
+                "SUM(COALESCE(fmc_count, 0)) as fmc_total "
+                "FROM hourly_counts WHERE hour_timestamp >= ?",
+                (cutoff_28d,),
+            ).fetchone()
+
+            if collected_hours_28d > 0 and row_28d["total"]:
+                fcs_avg = row_28d["fcs_total"] / collected_hours_28d
+                epp_avg = row_28d["epp_total"] / collected_hours_28d
+                fcsc_avg = row_28d["fcsc_total"] / collected_hours_28d
+                fmc_avg = row_28d["fmc_total"] / collected_hours_28d
+                total_avg = row_28d["total"] / collected_hours_28d
+            else:
+                fcs_avg = epp_avg = fcsc_avg = fmc_avg = total_avg = 0
+
+            # FCS split: FCS + FCSC + FMC use hourly avg, EPP uses 7-day weekly avg
+            # EPP weekly avg = average of daily unique EPP counts over 7 days
+            cutoff_7d = (datetime.utcnow() - timedelta(days=7)).strftime(
+                "%Y-%m-%d %H:%M:%S"
+            )
+
+            # For EPP weekly: get max epp_count per day, average over days with data
+            epp_daily = conn.execute(
+                "SELECT DATE(hour_timestamp) as day, MAX(COALESCE(epp_count, 0)) as daily_peak "
+                "FROM hourly_counts "
+                "WHERE hour_timestamp >= ? AND epp_count IS NOT NULL "
+                "GROUP BY DATE(hour_timestamp)",
+                (cutoff_7d,),
+            ).fetchall()
+
+            if epp_daily:
+                epp_weekly_avg = sum(r["daily_peak"] for r in epp_daily) / len(epp_daily)
+            else:
+                epp_weekly_avg = epp_avg  # fallback to hourly avg if no weekly data
+
+            fcs_split_total = math.ceil(fcs_avg) + math.ceil(epp_weekly_avg) + math.ceil(fcsc_avg) + math.ceil(fmc_avg)
+
+            # --- Scenario A: All-EPP (weekly average of daily peaks) ---
+            # If everything were EPP: daily peak of total sensors, averaged over 7 days
+            total_daily = conn.execute(
+                "SELECT DATE(hour_timestamp) as day, MAX(unique_sensor_count) as daily_peak "
+                "FROM hourly_counts "
+                "WHERE hour_timestamp >= ? "
+                "GROUP BY DATE(hour_timestamp)",
+                (cutoff_7d,),
+            ).fetchall()
+
+            if total_daily:
+                all_epp_weekly_avg = sum(r["daily_peak"] for r in total_daily) / len(total_daily)
+            else:
+                all_epp_weekly_avg = total_avg
+
+            all_epp_licenses = math.ceil(all_epp_weekly_avg)
+
+            # Delta
+            savings = all_epp_licenses - fcs_split_total
+            savings_pct = (savings / all_epp_licenses * 100) if all_epp_licenses > 0 else 0
+
+            return jsonify({
+                "scenario_a": {
+                    "name": "All sensors on EPP",
+                    "method": "Weekly avg of daily peaks (7 days)",
+                    "licenses": all_epp_licenses,
+                    "daily_peaks": [{"day": r["day"], "peak": r["daily_peak"]} for r in total_daily] if total_daily else [],
+                },
+                "scenario_b": {
+                    "name": "FCS/EPP/FCSC/FMC split",
+                    "method": "FCS/FCSC/FMC: 28-day hourly avg | EPP: 7-day weekly avg",
+                    "fcs_licenses": math.ceil(fcs_avg),
+                    "epp_licenses": math.ceil(epp_weekly_avg),
+                    "fcsc_licenses": math.ceil(fcsc_avg),
+                    "fmc_licenses": math.ceil(fmc_avg),
+                    "total_licenses": fcs_split_total,
+                },
+                "delta": {
+                    "savings": savings,
+                    "savings_pct": round(savings_pct, 1),
+                },
+                "data_coverage": {
+                    "hours_28d": collected_hours_28d,
+                    "days_7d": min(len(epp_daily) if epp_daily else 0, 7),
+                },
+            })
+        finally:
+            conn.close()
+
+    # ----------------------------------------------------------------
     # Streaming CSV exports
     # ----------------------------------------------------------------
 
@@ -192,9 +330,13 @@ def create_app(db_path: str = None) -> Flask:
         collected_hours = hours_row["total_hours"] or 1
 
         def generate_cid():
-            yield "cid,28day_avg,max_hourly,min_hourly,hours_collected,licenses_required\n"
+            yield "cid,28day_avg,fcs_avg,epp_avg,fcsc_avg,fmc_avg,max_hourly,min_hourly,hours_collected,licenses_required\n"
             cursor = conn.execute(
                 "SELECT cid, SUM(unique_sensor_count) as total, "
+                "SUM(COALESCE(fcs_count, 0)) as fcs_total, "
+                "SUM(COALESCE(epp_count, 0)) as epp_total, "
+                "SUM(COALESCE(fcsc_count, 0)) as fcsc_total, "
+                "SUM(COALESCE(fmc_count, 0)) as fmc_total, "
                 "MAX(unique_sensor_count) as max_s, "
                 "MIN(unique_sensor_count) as min_s, "
                 "COUNT(*) as hours "
@@ -204,8 +346,13 @@ def create_app(db_path: str = None) -> Flask:
             )
             for row in cursor:
                 avg = row["total"] / collected_hours
+                fcs_avg = row["fcs_total"] / collected_hours
+                epp_avg = row["epp_total"] / collected_hours
+                fcsc_avg = row["fcsc_total"] / collected_hours
+                fmc_avg = row["fmc_total"] / collected_hours
                 yield (
-                    f"{_csv_safe(row['cid'])},{avg:.2f},{row['max_s']},"
+                    f"{_csv_safe(row['cid'])},{avg:.2f},{fcs_avg:.2f},{epp_avg:.2f},"
+                    f"{fcsc_avg:.2f},{fmc_avg:.2f},{row['max_s']},"
                     f"{row['min_s']},{row['hours']},{math.ceil(avg)}\n"
                 )
             conn.close()

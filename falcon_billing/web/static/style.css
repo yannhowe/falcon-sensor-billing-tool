@@ -722,4 +722,213 @@ footer p {
     th, td {
         padding: 0.5rem;
     }
+
+    .comparison-grid {
+        grid-template-columns: 1fr;
+    }
+}
+
+/* Navigation */
+header nav {
+    margin-top: 0.75rem;
+}
+
+header nav a {
+    color: rgba(255,255,255,0.8);
+    text-decoration: none;
+    padding: 0.5rem 1.25rem;
+    border-bottom: 2px solid transparent;
+    font-size: 0.9rem;
+}
+
+header nav a:hover {
+    color: white;
+    border-bottom-color: rgba(255,255,255,0.5);
+}
+
+/* Comparison Page */
+.comparison-subtitle {
+    color: var(--text-light);
+    font-size: 0.9rem;
+    margin-top: 0.5rem;
+}
+
+.savings-banner {
+    background: linear-gradient(135deg, #27ae60, #2ecc71);
+    border-radius: 8px;
+    padding: 2rem;
+    margin-bottom: 2rem;
+    color: white;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    box-shadow: 0 4px 12px rgba(39, 174, 96, 0.3);
+}
+
+.savings-number {
+    font-size: 2.5rem;
+    font-weight: bold;
+}
+
+.savings-detail {
+    font-size: 1.1rem;
+    opacity: 0.9;
+    margin-top: 0.5rem;
+}
+
+.comparison-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 2rem;
+    margin-bottom: 2rem;
+}
+
+.comparison-card {
+    background: var(--card);
+    border-radius: 8px;
+    padding: 2rem;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+    border-top: 4px solid var(--border);
+}
+
+.comparison-card.scenario-a {
+    border-top-color: var(--warning);
+}
+
+.comparison-card.scenario-b {
+    border-top-color: var(--success);
+}
+
+.scenario-header {
+    font-size: 1.25rem;
+    font-weight: bold;
+    color: var(--text);
+    margin-bottom: 0.25rem;
+}
+
+.scenario-method {
+    font-size: 0.8rem;
+    color: var(--text-light);
+    margin-bottom: 1.5rem;
+}
+
+.scenario-total {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 1.5rem;
+    background: var(--bg);
+    border-radius: 8px;
+    margin-bottom: 1.5rem;
+}
+
+.scenario-total .total-label {
+    font-size: 0.8rem;
+    color: var(--text-light);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.scenario-total .total-value {
+    font-size: 3rem;
+    font-weight: bold;
+    color: var(--primary);
+    line-height: 1.2;
+}
+
+.scenario-breakdown {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+}
+
+.breakdown-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.5rem 0;
+    border-bottom: 1px solid var(--border);
+    font-size: 0.9rem;
+}
+
+.breakdown-row:last-child {
+    border-bottom: none;
+}
+
+.breakdown-row span:last-child {
+    font-weight: bold;
+    font-size: 1.1rem;
+}
+
+/* Methodology Page */
+.methodology-content {
+    line-height: 1.8;
+}
+
+.methodology-content p {
+    margin-bottom: 1rem;
+    font-size: 0.9rem;
+}
+
+.methodology-content table {
+    margin: 1.5rem 0;
+}
+
+.method-note {
+    color: var(--text-light);
+    font-size: 0.85rem !important;
+    font-style: italic;
+}
+
+.method-highlight {
+    background: var(--bg);
+    border-left: 4px solid var(--primary);
+    padding: 1rem 1.5rem;
+    margin: 1.5rem 0;
+    border-radius: 0 6px 6px 0;
+}
+
+.method-highlight h4 {
+    color: var(--primary);
+    margin-bottom: 0.5rem;
+    font-size: 0.95rem;
+}
+
+.method-highlight p {
+    margin-bottom: 0;
+    font-size: 0.875rem;
+}
+
+.method-highlight code {
+    background: rgba(0,0,0,0.05);
+    padding: 0.15rem 0.4rem;
+    border-radius: 3px;
+    font-size: 0.8rem;
+}
+
+.avg-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1.5rem;
+    margin: 1.5rem 0;
+}
+
+.avg-card {
+    background: var(--bg);
+    padding: 1.5rem;
+    border-radius: 8px;
+    border-top: 3px solid var(--primary);
+}
+
+.avg-card h4 {
+    margin-bottom: 0.75rem;
+    color: var(--text);
+}
+
+.avg-formula {
+    font-size: 1.1rem;
+    font-weight: bold;
+    color: var(--primary);
+    margin-bottom: 0.75rem;
 }

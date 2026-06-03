@@ -1,0 +1,152 @@
+{% extends "base.html" %}
+
+{% block title %}EPP vs FCS Comparison - Falcon Billing{% endblock %}
+
+{% block content %}
+<!-- Comparison Header -->
+<section class="summary-card">
+    <div class="section-header">
+        <h2>License Comparison: All-EPP vs FCS Split</h2>
+    </div>
+    <p class="comparison-subtitle">
+        Shows the difference in total license count when sensors are properly classified
+        into FCS/FCSC/FMC (hourly averaging) vs billing everything as EPP (weekly averaging).
+    </p>
+</section>
+
+<!-- Savings Banner -->
+<section class="savings-banner" id="savings-banner" style="display:none;">
+    <div class="savings-number">
+        <span id="savings-count">-</span> fewer licenses
+    </div>
+    <div class="savings-detail">
+        <span id="savings-pct">-</span>% reduction with proper FCS classification
+    </div>
+</section>
+
+<!-- Side-by-side comparison -->
+<section class="comparison-grid">
+    <!-- Scenario A -->
+    <div class="comparison-card scenario-a">
+        <div class="scenario-header">Scenario A: All EPP</div>
+        <div class="scenario-method">Weekly avg of daily peaks (7 days)</div>
+        <div class="scenario-total">
+            <span class="total-label">Total Licenses</span>
+            <span class="total-value" id="all-epp-total">-</span>
+        </div>
+        <div class="scenario-breakdown">
+            <div class="breakdown-row">
+                <span>EPP (all sensors)</span>
+                <span id="all-epp-count">-</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- Scenario B -->
+    <div class="comparison-card scenario-b">
+        <div class="scenario-header">Scenario B: FCS Split</div>
+        <div class="scenario-method">FCS/FCSC/FMC: 28-day hourly avg | EPP: 7-day weekly avg</div>
+        <div class="scenario-total">
+            <span class="total-label">Total Licenses</span>
+            <span class="total-value" id="fcs-split-total">-</span>
+        </div>
+        <div class="scenario-breakdown">
+            <div class="breakdown-row">
+                <span>FCS (VMs/servers)</span>
+                <span id="fcs-count">-</span>
+            </div>
+            <div class="breakdown-row">
+                <span>EPP (endpoints)</span>
+                <span id="epp-count">-</span>
+            </div>
+            <div class="breakdown-row">
+                <span>FCSC (container hosts)</span>
+                <span id="fcsc-count">-</span>
+            </div>
+            <div class="breakdown-row">
+                <span>FMC (pods)</span>
+                <span id="fmc-count">-</span>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- Data coverage -->
+<section class="data-section">
+    <div class="section-header">
+        <h2>Data Coverage</h2>
+    </div>
+    <div class="summary-grid">
+        <div class="metric">
+            <span class="label">28-Day Hours</span>
+            <span class="value" id="hours-28d">-</span>
+            <span class="sublabel">of 672 target</span>
+        </div>
+        <div class="metric">
+            <span class="label">7-Day Coverage</span>
+            <span class="value" id="days-7d">-</span>
+            <span class="sublabel">days with EPP data</span>
+        </div>
+    </div>
+</section>
+
+<!-- Methodology -->
+<section class="info-section">
+    <h3>How This Comparison Works</h3>
+    <div class="info-grid">
+        <div class="info-box">
+            <h4>Scenario A: All EPP</h4>
+            <p>Takes the <strong>daily peak</strong> total sensor count for each of the last 7 days, then averages.</p>
+            <p>This is how EPP licensing works — weekly average inflates the count because every sensor seen in a day counts once.</p>
+        </div>
+        <div class="info-box">
+            <h4>Scenario B: FCS Split</h4>
+            <p><strong>FCS/FCSC/FMC:</strong> 28-day hourly average (672 hours). Ephemeral VMs that spin down at night reduce the average.</p>
+            <p><strong>EPP:</strong> 7-day weekly average of daily peaks (physical endpoints are always-on, so method doesn't matter much).</p>
+        </div>
+        <div class="info-box">
+            <h4>Why FCS Benefits Ephemeral Workloads</h4>
+            <p>Cloud VMs and containers scale up/down. Hourly averaging captures this — a VM running 12h/day counts as <strong>0.5</strong>, not 1.</p>
+            <p>EPP endpoints (laptops) are always-on, so the averaging method barely changes the count.</p>
+        </div>
+    </div>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script>
+async function loadComparison() {
+    try {
+        const response = await apiFetch('/api/fcs/comparison');
+        const data = await response.json();
+
+        // Scenario A
+        document.getElementById('all-epp-total').textContent = data.scenario_a.licenses.toLocaleString();
+        document.getElementById('all-epp-count').textContent = data.scenario_a.licenses.toLocaleString();
+
+        // Scenario B
+        document.getElementById('fcs-split-total').textContent = data.scenario_b.total_licenses.toLocaleString();
+        document.getElementById('fcs-count').textContent = data.scenario_b.fcs_licenses.toLocaleString();
+        document.getElementById('epp-count').textContent = data.scenario_b.epp_licenses.toLocaleString();
+        document.getElementById('fcsc-count').textContent = data.scenario_b.fcsc_licenses.toLocaleString();
+        document.getElementById('fmc-count').textContent = data.scenario_b.fmc_licenses.toLocaleString();
+
+        // Savings
+        if (data.delta.savings > 0) {
+            document.getElementById('savings-banner').style.display = 'flex';
+            document.getElementById('savings-count').textContent = data.delta.savings.toLocaleString();
+            document.getElementById('savings-pct').textContent = data.delta.savings_pct;
+        }
+
+        // Coverage
+        document.getElementById('hours-28d').textContent = `${data.data_coverage.hours_28d} / 672`;
+        document.getElementById('days-7d').textContent = `${data.data_coverage.days_7d} / 7`;
+
+    } catch (error) {
+        console.error('Error loading comparison:', error);
+    }
+}
+
+document.addEventListener('DOMContentLoaded', () => { loadComparison(); });
+</script>
+{% endblock %}

@@ -12,8 +12,8 @@ license type, and calculate 28-day rolling averages for FCS/EPP/FCSC/FMC licensi
 
 | Type | Name | What it covers |
 |------|------|---------------|
-| **FCS** | Falcon Cloud Security | Cloud VMs — AWS EC2, Azure VM, GCP Compute, Alibaba ECS, etc. |
-| **EPP** | Endpoint Protection | On-prem servers, physical machines, endpoints |
+| **FCS** | Falcon Cloud Security | VMs and servers — cloud or on-prem (any hypervisor or bare-metal server) |
+| **EPP** | Endpoint Protection | Physical workstations, laptops, mobile devices |
 | **FCSC** | Container Security (hosts) | Hosts running OCI containers (`OciContainerStarted` events, not pods) |
 | **FMC** | Falcon Managed Containers | Kubernetes pods (`SensorHeartbeat` with `ProductType=Pod`) |
 
@@ -103,18 +103,30 @@ NGSIEM (LogScale)
 ### Classification
 
 Hosts in the NGSIEM anti-join (SensorHeartbeat, not pod, not OCI events) are
-either FCS (cloud VMs) or EPP (on-prem/physical). Classification uses:
+either FCS (VMs/servers) or EPP (user endpoints). The goal is to **maximize FCS**
+— any VM or server should be FCS; only physical workstations and laptops are EPP.
 
-| Priority | Field | Source | Example values |
-|----------|-------|--------|---------------|
-| 1 (highest) | `cloud_provider` | IMDS auto-detected | `aws`, `azure`, `gcp`, `oci`, `alibaba`, `huawei`, `tencent`, `volcengine` |
-| 2 | `system_manufacturer` | DMI string | `Amazon EC2`, `Microsoft Corporation`, `Google`, `Alibaba Cloud` |
-| 3 (fallback) | `sensor_tags` | User-applied | Tags containing `aws`, `azure`, `gcp`, etc. |
+| Priority | Signal | Logic |
+|----------|--------|-------|
+| 1 (highest) | `system_manufacturer` is a hypervisor | VMware, QEMU, KVM, Xen, Hyper-V, VirtualBox, Nutanix → **FCS** (VM, including VDI) |
+| 2 | `cloud_provider` (IMDS) | `aws`, `azure`, `gcp`, `oci`, etc. → **FCS** |
+| 3 | `system_manufacturer` is a cloud vendor | Amazon, Google, Alibaba, etc. → **FCS** |
+| 4 | `product_type_desc` | `Server`, `Domain Controller` → **FCS** (bare-metal server) |
+| 5 (fallback) | `sensor_tags` | Tags containing `aws`, `azure`, `cloud`, `vm`, `vdi` → **FCS** |
+| 6 (default) | None of the above | → **EPP** (physical workstation, laptop, mobile) |
 
-**Note:** Tag-based classification is a fallback only. Tags are user-applied and can
-be wrong (e.g. VMs tagged with a cloud provider they were migrated from).
+If none of the signals indicate a VM or server, the host is classified as **EPP**.
 
-If none of the three signals indicate a cloud VM, the host is classified as **EPP**.
+### Raw Data vs License Averages
+
+Each row in the hourly CSV is a **snapshot count** — the exact number of sensors
+active in that clock hour. The dashboard and summary apply averaging on top:
+
+- **FCS / FCSC / FMC**: 28-day rolling hourly average (sum of 672 hours / 672)
+- **EPP**: 7-day weekly average of daily unique sensors
+
+Raw hourly counts will differ from the final averaged license numbers shown on the
+dashboard. Both are useful: hourly data for auditing, averages for billing.
 
 ---
 

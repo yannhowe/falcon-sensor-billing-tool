@@ -44,15 +44,18 @@
                 <tr>
                     <th data-sort="cid" onclick="sortCIDTable('cid', 'string')" class="sortable">CID</th>
                     <th data-sort="avg_sensors" onclick="sortCIDTable('avg_sensors')" class="sortable">28-Day Avg</th>
+                    <th data-sort="fcs_avg" onclick="sortCIDTable('fcs_avg')" class="sortable">FCS</th>
+                    <th data-sort="epp_avg" onclick="sortCIDTable('epp_avg')" class="sortable">EPP</th>
+                    <th data-sort="fcsc_avg" onclick="sortCIDTable('fcsc_avg')" class="sortable">FCSC</th>
+                    <th data-sort="fmc_avg" onclick="sortCIDTable('fmc_avg')" class="sortable">FMC</th>
                     <th data-sort="max_sensors" onclick="sortCIDTable('max_sensors')" class="sortable">Max Hourly</th>
-                    <th data-sort="min_sensors" onclick="sortCIDTable('min_sensors')" class="sortable">Min Hourly</th>
                     <th data-sort="hours_collected" onclick="sortCIDTable('hours_collected')" class="sortable">Hours</th>
                     <th data-sort="licenses_required" onclick="sortCIDTable('licenses_required')" class="sortable licenses">Licenses Required</th>
                 </tr>
             </thead>
             <tbody>
                 <tr>
-                    <td colspan="6" class="loading">Loading data...</td>
+                    <td colspan="9" class="loading">Loading data...</td>
                 </tr>
             </tbody>
         </table>

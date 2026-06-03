@@ -155,14 +155,17 @@ function displayFCSData(data) {
     const cidTable = document.querySelector('#cid-table tbody');
     if (cidTable) {
         if (data.cids.length === 0) {
-            cidTable.innerHTML = '<tr><td colspan="6" class="loading">No data available</td></tr>';
+            cidTable.innerHTML = '<tr><td colspan="9" class="loading">No data available</td></tr>';
         } else {
             cidTable.innerHTML = data.cids.map(cid => `
                 <tr>
                     <td><strong>${escapeHtml(cid.cid)}</strong></td>
                     <td>${cid.avg_sensors.toFixed(2)}</td>
+                    <td>${(cid.fcs_avg || 0).toFixed(2)}</td>
+                    <td>${(cid.epp_avg || 0).toFixed(2)}</td>
+                    <td>${(cid.fcsc_avg || 0).toFixed(2)}</td>
+                    <td>${(cid.fmc_avg || 0).toFixed(2)}</td>
                     <td>${cid.max_sensors}</td>
-                    <td>${cid.min_sensors}</td>
                     <td>${cid.hours_collected} / ${data.target_hours}</td>
                     <td class="licenses-cell">${cid.licenses_required}</td>
                 </tr>
@@ -172,7 +175,7 @@ function displayFCSData(data) {
             cidTable.innerHTML += `
                 <tr class="total-row">
                     <td><strong>TOTAL (${data.cids.length} CID${data.cids.length > 1 ? 's' : ''})</strong></td>
-                    <td>-</td><td>-</td><td>-</td><td>-</td>
+                    <td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td>
                     <td class="licenses-cell"><strong>${totalLicenses.toLocaleString()}</strong></td>
                 </tr>
             `;

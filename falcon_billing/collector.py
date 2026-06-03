@@ -270,6 +270,7 @@ def enrich_sensors_with_host_details(
                         'cid': resource.get('cid', 'default'),
                         'manufacturer': resource.get('system_manufacturer'),
                         'cloud_provider': resource.get('cloud_provider'),
+                        'product_type_desc': resource.get('product_type_desc'),
                     }
                     host_details.append(host_data)
                     enriched[host_data['sensor_id']] = host_data
@@ -410,7 +411,7 @@ def process_hourly_collection(
         falcon_client = get_falcon_client()
     enriched = enrich_sensors_with_host_details(falcon_client, db, sensor_ids)
 
-    # Classify fcs_ids into FCS (cloud VMs) vs EPP (on-prem endpoints)
+    # Classify fcs_ids into FCS (VMs/servers) vs EPP (user endpoints)
     from falcon_billing.classifier import is_cloud_vm
     fcs_final = None
     epp_count = None
@@ -423,12 +424,13 @@ def process_hourly_collection(
                 manufacturer=meta.get('manufacturer'),
                 cloud_provider=meta.get('cloud_provider'),
                 tags=meta.get('tags'),
+                product_type_desc=meta.get('product_type_desc'),
             ):
                 fcs_final += 1
             else:
                 epp_count += 1
         fcs_count = fcs_final
-        logger.info(f"FCS (cloud VMs): {fcs_final}, EPP (endpoints): {epp_count} for hour {hour_str}")
+        logger.info(f"FCS (VMs/servers): {fcs_final}, EPP (endpoints): {epp_count} for hour {hour_str}")
 
     # Tally check
     if all(v is not None for v in [fcsc_count, fmc_count, fcs_final, epp_count]):
@@ -591,7 +593,7 @@ def store_hour_data(
     db.insert_sensor_logs(hour_str, sensors_to_insert, cid)
     unique_count = len(sensor_ids)
 
-    # Classify fcs_ids into FCS (cloud VMs) vs EPP (on-prem endpoints)
+    # Classify fcs_ids into FCS (VMs/servers) vs EPP (user endpoints)
     fcs_final = None
     epp_count = None
     if fcs_ids is not None:
@@ -603,6 +605,7 @@ def store_hour_data(
                 manufacturer=meta.get('manufacturer'),
                 cloud_provider=meta.get('cloud_provider'),
                 tags=meta.get('tags'),
+                product_type_desc=meta.get('product_type_desc'),
             ):
                 fcs_final += 1
             else:

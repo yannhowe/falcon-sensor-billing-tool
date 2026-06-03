@@ -1,0 +1,240 @@
+{% extends "base.html" %}
+
+{% block title %}Methodology - Falcon Billing{% endblock %}
+
+{% block content %}
+<!-- Overview -->
+<section class="summary-card">
+    <div class="section-header">
+        <h2>Classification &amp; Billing Methodology</h2>
+    </div>
+    <p class="comparison-subtitle">
+        How sensors are collected, classified into license types, and averaged for billing.
+    </p>
+</section>
+
+<!-- Step 1: Collection -->
+<section class="data-section">
+    <h2>Step 1: Hourly Sensor Collection</h2>
+    <div class="methodology-content">
+        <p>Every clock hour, four NGSIEM queries run against the Falcon data lake:</p>
+        <table>
+            <thead>
+                <tr>
+                    <th>Query</th>
+                    <th>What it finds</th>
+                    <th>License type</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><strong>Total sensors</strong></td>
+                    <td>SensorHeartbeat (not pods), anti-joined with OCI container events</td>
+                    <td>FCS + EPP pool</td>
+                </tr>
+                <tr>
+                    <td><strong>Container hosts (FCSC)</strong></td>
+                    <td>AIDs with OciContainerStarted / OciContainerTelemetry events</td>
+                    <td>FCSC</td>
+                </tr>
+                <tr>
+                    <td><strong>Pods (FMC)</strong></td>
+                    <td>SensorHeartbeat with ProductType=Pod</td>
+                    <td>FMC</td>
+                </tr>
+                <tr>
+                    <td><strong>FCS candidates</strong></td>
+                    <td>Total minus FCSC minus FMC (anti-join)</td>
+                    <td>FCS or EPP (needs classification)</td>
+                </tr>
+            </tbody>
+        </table>
+        <p class="method-note">Each query returns a set of unique AIDs (Agent IDs) active in that hour.</p>
+    </div>
+</section>
+
+<!-- Step 2: Classification -->
+<section class="data-section">
+    <h2>Step 2: FCS vs EPP Classification</h2>
+    <div class="methodology-content">
+        <p>For sensors in the FCS candidate pool, the Hosts API provides metadata used to classify each host
+           into the appropriate license type based on its infrastructure characteristics.</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>Priority</th>
+                    <th>Signal</th>
+                    <th>Logic</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><strong>1 (highest)</strong></td>
+                    <td>system_manufacturer is a hypervisor</td>
+                    <td>VMware, QEMU, KVM, Xen, Hyper-V, VirtualBox, Nutanix &rarr; <strong>FCS</strong></td>
+                </tr>
+                <tr>
+                    <td><strong>2</strong></td>
+                    <td>cloud_provider (IMDS)</td>
+                    <td>AWS, Azure, GCP, OCI, Alibaba, etc. &rarr; <strong>FCS</strong></td>
+                </tr>
+                <tr>
+                    <td><strong>3</strong></td>
+                    <td>system_manufacturer is a cloud vendor</td>
+                    <td>Amazon, Google, Alibaba Cloud, etc. &rarr; <strong>FCS</strong></td>
+                </tr>
+                <tr>
+                    <td><strong>4</strong></td>
+                    <td>product_type_desc</td>
+                    <td>Server, Domain Controller &rarr; <strong>FCS</strong> (bare-metal server)</td>
+                </tr>
+                <tr>
+                    <td><strong>5</strong></td>
+                    <td>sensor_tags (fallback)</td>
+                    <td>Tags containing aws, azure, cloud, vm, vdi &rarr; <strong>FCS</strong></td>
+                </tr>
+                <tr>
+                    <td><strong>6 (default)</strong></td>
+                    <td>None of the above</td>
+                    <td>&rarr; <strong>EPP</strong> (physical workstation, laptop, mobile)</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <div class="method-highlight">
+            <h4>Why hypervisor manufacturer is #1</h4>
+            <p>A Linux workstation on VMware is still a VM (VDI) &mdash; it should be FCS regardless of <code>product_type_desc</code>.
+               Physical workstations (Dell, HP, Lenovo, Apple) correctly fall through to EPP.</p>
+        </div>
+    </div>
+</section>
+
+<!-- Step 3: Storage -->
+<section class="data-section">
+    <h2>Step 3: Hourly Count Storage</h2>
+    <div class="methodology-content">
+        <p>Each clock hour produces one row in <code>hourly_counts</code>:</p>
+        <table>
+            <thead>
+                <tr>
+                    <th>Column</th>
+                    <th>Meaning</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr><td><code>unique_sensor_count</code></td><td>Total distinct AIDs active in this hour</td></tr>
+                <tr><td><code>fcs_count</code></td><td>FCS-classified sensors (VMs, servers)</td></tr>
+                <tr><td><code>epp_count</code></td><td>EPP-classified sensors (endpoints)</td></tr>
+                <tr><td><code>fcsc_count</code></td><td>Container host sensors</td></tr>
+                <tr><td><code>fmc_count</code></td><td>Pod sensors (managed containers)</td></tr>
+            </tbody>
+        </table>
+        <p class="method-note"><strong>Invariant:</strong> fcs_count + epp_count + fcsc_count + fmc_count = unique_sensor_count</p>
+    </div>
+</section>
+
+<!-- Step 4: Averaging -->
+<section class="data-section">
+    <h2>Step 4: License Averaging</h2>
+    <div class="methodology-content">
+        <div class="avg-grid">
+            <div class="avg-card">
+                <h4>FCS / FCSC / FMC</h4>
+                <div class="avg-formula">28-day hourly average</div>
+                <p>SUM(hourly counts over 672 hours) &divide; 672</p>
+                <p class="method-note">Rolling window — slides forward each hour. VMs that scale down at night reduce the average.</p>
+            </div>
+            <div class="avg-card">
+                <h4>EPP</h4>
+                <div class="avg-formula">7-day weekly average</div>
+                <p>SUM(daily peak EPP counts over 7 days) &divide; 7</p>
+                <p class="method-note">Daily peak = max EPP sensors seen in any hour that day. Averaged over 7 days.</p>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- Step 5: Why FCS saves -->
+<section class="data-section">
+    <h2>Hourly Averaging vs Weekly Averaging</h2>
+    <div class="methodology-content">
+        <table>
+            <thead>
+                <tr>
+                    <th>Workload Pattern</th>
+                    <th>EPP Count (weekly avg)</th>
+                    <th>FCS Count (hourly avg)</th>
+                    <th>Reduction</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>Always-on VMs (24/7)</td>
+                    <td>100</td>
+                    <td>100</td>
+                    <td>0%</td>
+                </tr>
+                <tr>
+                    <td>Business hours only (12h/day)</td>
+                    <td>100</td>
+                    <td>50</td>
+                    <td>50%</td>
+                </tr>
+                <tr>
+                    <td>Dev/test (weekdays 9-5)</td>
+                    <td>100</td>
+                    <td>24</td>
+                    <td>76%</td>
+                </tr>
+                <tr>
+                    <td>Auto-scaling (40-60% peak)</td>
+                    <td>100</td>
+                    <td>40-60</td>
+                    <td>40-60%</td>
+                </tr>
+                <tr>
+                    <td>CI/CD runners (ephemeral)</td>
+                    <td>50</td>
+                    <td>5-15</td>
+                    <td>70-90%</td>
+                </tr>
+            </tbody>
+        </table>
+        <p class="method-note">EPP weekly average counts every sensor seen in a day as 1 for that day.
+           FCS hourly average only counts a sensor in the hours it was actually active.
+           Ephemeral and auto-scaling workloads benefit most from hourly averaging.</p>
+    </div>
+</section>
+
+<!-- License Type Summary -->
+<section class="info-section">
+    <h3>License Type Reference</h3>
+    <div class="info-grid">
+        <div class="info-box">
+            <h4>FCS — Cloud Security</h4>
+            <p><strong>Covers:</strong> Cloud VMs, on-prem VMs (VMware, Hyper-V, KVM), VDI, bare-metal servers</p>
+            <p><strong>Metering:</strong> 28-day hourly average</p>
+            <p><strong>Signal:</strong> Hypervisor manufacturer, cloud provider, or server role</p>
+        </div>
+        <div class="info-box">
+            <h4>EPP — Endpoint Protection</h4>
+            <p><strong>Covers:</strong> Physical workstations, laptops, mobile devices</p>
+            <p><strong>Metering:</strong> 7-day weekly average of daily peaks</p>
+            <p><strong>Signal:</strong> Physical manufacturer (Dell, HP, Lenovo, Apple) + no hypervisor indicators</p>
+        </div>
+        <div class="info-box">
+            <h4>FCSC — Container Hosts</h4>
+            <p><strong>Covers:</strong> Hosts running OCI containers (K8s nodes, Docker hosts, ECS instances)</p>
+            <p><strong>Metering:</strong> 28-day hourly average</p>
+            <p><strong>Signal:</strong> OciContainerStarted / OciContainerTelemetry events in NGSIEM</p>
+        </div>
+        <div class="info-box">
+            <h4>FMC — Managed Containers</h4>
+            <p><strong>Covers:</strong> Kubernetes pods, Fargate tasks, serverless containers</p>
+            <p><strong>Metering:</strong> 28-day hourly average</p>
+            <p><strong>Signal:</strong> SensorHeartbeat with ProductType=Pod</p>
+        </div>
+    </div>
+</section>
+{% endblock %}

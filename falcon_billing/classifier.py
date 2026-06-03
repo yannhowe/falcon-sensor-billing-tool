@@ -149,23 +149,58 @@ def classify_sensor_from_row(row):
     )
 
 
-def is_cloud_vm(manufacturer=None, cloud_provider=None, tags=None) -> bool:
-    """Determine if a host is a cloud VM (FCS-billable) vs on-prem endpoint (EPP).
+def is_cloud_vm(manufacturer=None, cloud_provider=None, tags=None, product_type_desc=None) -> bool:
+    """Determine if a host is FCS-billable (VM/server) vs EPP (user endpoint).
+
+    Goal: Maximize FCS classification. Any VM or server (cloud or on-prem)
+    should be FCS. Only physical workstations, laptops, and mobile devices
+    should be EPP.
 
     Classification priority:
-    1. cloud_provider field (IMDS auto-detected) — most reliable
-    2. system_manufacturer (hypervisor DMI) — authoritative, not user-editable
-    3. sensor_tags fallback — least reliable (user-applied, can be wrong)
+    1. Manufacturer is a hypervisor → FCS (VM, including VDI)
+    2. cloud_provider field (IMDS) → FCS (cloud VM)
+    3. Manufacturer is a cloud vendor → FCS
+    4. product_type_desc is Server/Domain Controller → FCS (bare-metal server)
+    5. sensor_tags with cloud/vm keywords → FCS
+    6. Everything else → EPP (physical workstation, laptop, mobile)
 
     Args:
         manufacturer: system_manufacturer from Hosts API (DMI string)
         cloud_provider: cloud_provider from Hosts API (IMDS auto-detected)
         tags: JSON string or list of sensor tags
+        product_type_desc: product_type_desc from Hosts API (Server, Workstation, etc.)
 
     Returns:
-        bool: True if cloud VM (FCS), False if on-prem endpoint (EPP)
+        bool: True if FCS-eligible, False if EPP
     """
-    # --- Primary: cloud_provider field (IMDS auto-detected) ---
+    # --- 1. Manufacturer is a hypervisor → FCS (any VM, including VDI) ---
+    if manufacturer:
+        mfr_lower = manufacturer.strip().lower()
+
+        hypervisor_patterns = [
+            'vmware',
+            'innotek',        # VirtualBox
+            'bochs',          # KVM/QEMU
+            'qemu',
+            'red hat',        # KVM on-prem
+            'xen',            # Citrix/AWS Xen
+            'parallels',
+            'nutanix',        # AHV hypervisor
+        ]
+        for pattern in hypervisor_patterns:
+            if pattern in mfr_lower:
+                return True
+
+        # "Microsoft Corporation" as manufacturer = Hyper-V VM
+        # (not to be confused with physical Surface devices which report
+        # "Microsoft Corporation" but have product_type_desc=Workstation
+        # and no hypervisor traits — handled below)
+        if 'microsoft corporatio' in mfr_lower:
+            # Microsoft Corporation as manufacturer almost always means Hyper-V/Azure VM
+            # Physical Surface devices are rare in enterprise server fleets
+            return True
+
+    # --- 2. cloud_provider field (IMDS auto-detected) ---
     if cloud_provider:
         cp_lower = cloud_provider.strip().lower()
         cloud_cp_values = {
@@ -175,15 +210,12 @@ def is_cloud_vm(manufacturer=None, cloud_provider=None, tags=None) -> bool:
         if cp_lower in cloud_cp_values:
             return True
 
-    # --- Secondary: system_manufacturer (hypervisor DMI) ---
+    # --- 3. Manufacturer is a cloud vendor ---
     if manufacturer:
         mfr_lower = manufacturer.strip().lower()
-
-        # Explicit cloud DMI patterns
         cloud_mfr_patterns = [
             'amazon ec2',
             'amazon',
-            'microsoft corporation',  # Azure VMs
             'google',
             'alibaba cloud',
             'alibaba',
@@ -196,19 +228,13 @@ def is_cloud_vm(manufacturer=None, cloud_provider=None, tags=None) -> bool:
             if pattern in mfr_lower:
                 return True
 
-        # Explicit on-prem / hypervisor patterns — return False immediately
-        onprem_mfr_patterns = [
-            'vmware',
-            'innotek',   # VirtualBox
-            'bochs',     # KVM/QEMU
-            'qemu',
-            'red hat',   # KVM on-prem
-        ]
-        for pattern in onprem_mfr_patterns:
-            if pattern in mfr_lower:
-                return False
+    # --- 4. product_type_desc indicates server role → FCS (bare-metal server) ---
+    if product_type_desc:
+        ptd_lower = product_type_desc.strip().lower()
+        if ptd_lower in ('server', 'domain controller'):
+            return True
 
-    # --- Fallback: sensor_tags ---
+    # --- 5. Fallback: sensor_tags ---
     try:
         if isinstance(tags, str):
             tags_list = json.loads(tags) if tags else []
@@ -223,13 +249,14 @@ def is_cloud_vm(manufacturer=None, cloud_provider=None, tags=None) -> bool:
         'aws', 'ec2', 'azure', 'gcp', 'google cloud',
         'alibaba', 'aliyun', 'oracle cloud', 'oci',
         'huawei cloud', 'tencent cloud', 'volcengine',
-        'cloud', 'vm',
+        'cloud', 'vm', 'vdi',
     ]
     tags_lower = [str(t).lower() for t in tags_list]
     for tag in tags_lower:
         if any(kw in tag for kw in cloud_tag_keywords):
             return True
 
+    # --- 6. Default: EPP (physical workstation, laptop, mobile) ---
     return False
 
 

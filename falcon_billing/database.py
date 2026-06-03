@@ -107,6 +107,7 @@ class BillingDatabase:
         self._migrate_add_fcs_count()
         self._migrate_add_manufacturer_cloud_provider()
         self._migrate_add_epp_count()
+        self._migrate_add_product_type_desc()
 
         # After all migrations, ensure schema_version reflects current version
         row = conn.execute("SELECT version FROM schema_version").fetchone()
@@ -227,6 +228,19 @@ class BillingDatabase:
         else:
             logger.debug("epp_count column already exists")
 
+    def _migrate_add_product_type_desc(self):
+        """Add product_type_desc column to host_metadata_cache if it doesn't exist."""
+        conn = self.get_connection()
+        cursor = conn.execute("PRAGMA table_info(host_metadata_cache)")
+        columns = [row[1] for row in cursor.fetchall()]
+        if "product_type_desc" not in columns:
+            logger.info("Adding product_type_desc column to host_metadata_cache...")
+            conn.execute("ALTER TABLE host_metadata_cache ADD COLUMN product_type_desc TEXT")
+            conn.commit()
+            logger.info("Migration complete: product_type_desc added to host_metadata_cache")
+        else:
+            logger.debug("product_type_desc column already exists")
+
     def _configure(self, conn: sqlite3.Connection):
         """Apply SQLite performance and reliability settings."""
         # WAL mode for better concurrency (readers don't block writers)
@@ -321,7 +335,8 @@ class BillingDatabase:
                 last_seen TEXT,
                 detection_metadata TEXT,
                 manufacturer TEXT,
-                cloud_provider TEXT
+                cloud_provider TEXT,
+                product_type_desc TEXT
             )
         """)
         conn.execute(
@@ -405,6 +420,7 @@ class BillingDatabase:
         last_seen: str = None,
         manufacturer: str = None,
         cloud_provider: str = None,
+        product_type_desc: str = None,
     ):
         """
         Upsert a single host's metadata into the cache.
@@ -422,6 +438,7 @@ class BillingDatabase:
             last_seen: Last-seen timestamp from the API
             manufacturer: system_manufacturer DMI string from Hosts API
             cloud_provider: cloud_provider IMDS field from Hosts API
+            product_type_desc: product_type_desc from Hosts API (Server, Workstation, etc.)
 
         Note: detection_metadata is intentionally excluded from this upsert. It is a
         separate enrichment column populated after initial host discovery. Including it
@@ -434,8 +451,8 @@ class BillingDatabase:
             INSERT INTO host_metadata_cache (
                 sensor_id, hostname, platform_name, platform_version,
                 os_version, status, groups, tags, cid, last_updated, last_seen,
-                manufacturer, cloud_provider
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                manufacturer, cloud_provider, product_type_desc
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(sensor_id) DO UPDATE SET
                 hostname = excluded.hostname,
                 platform_name = excluded.platform_name,
@@ -448,7 +465,8 @@ class BillingDatabase:
                 last_updated = excluded.last_updated,
                 last_seen = excluded.last_seen,
                 manufacturer = excluded.manufacturer,
-                cloud_provider = excluded.cloud_provider
+                cloud_provider = excluded.cloud_provider,
+                product_type_desc = excluded.product_type_desc
             """,
             (
                 sensor_id,
@@ -464,6 +482,7 @@ class BillingDatabase:
                 last_seen,
                 manufacturer,
                 cloud_provider,
+                product_type_desc,
             ),
         )
         conn.commit()
@@ -485,8 +504,8 @@ class BillingDatabase:
                 INSERT INTO host_metadata_cache (
                     sensor_id, hostname, platform_name, platform_version,
                     os_version, status, groups, tags, cid, last_updated, last_seen,
-                    manufacturer, cloud_provider
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    manufacturer, cloud_provider, product_type_desc
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(sensor_id) DO UPDATE SET
                     hostname = excluded.hostname,
                     platform_name = excluded.platform_name,
@@ -499,7 +518,8 @@ class BillingDatabase:
                     last_updated = excluded.last_updated,
                     last_seen = excluded.last_seen,
                     manufacturer = excluded.manufacturer,
-                    cloud_provider = excluded.cloud_provider
+                    cloud_provider = excluded.cloud_provider,
+                    product_type_desc = excluded.product_type_desc
                 """,
                 (
                     host.get("sensor_id"),
@@ -515,6 +535,7 @@ class BillingDatabase:
                     host.get("last_seen"),
                     host.get("manufacturer"),
                     host.get("cloud_provider"),
+                    host.get("product_type_desc"),
                 ),
             )
         conn.commit()
