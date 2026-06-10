@@ -27,21 +27,33 @@ _BULK_SENSOR_QUERY = """
 """
 
 # FCS query: SensorHeartbeat AIDs that are NOT pods AND NOT container runtime hosts
-# Uses !join anti-join to exclude AIDs that emitted OCI container events (FCSC hosts)
+# Uses !join anti-join to exclude AIDs that emitted any OCI container event (FCSC hosts)
 _FCS_QUERY = """
 #event_simpleName=SensorHeartbeat
 | ProductType!=Pod
 | groupBy([aid])
 | !join(query={
-    (#event_simpleName=OciContainerStarted OR #event_simpleName=OciContainerTelemetry)
+    #event_simpleName=Oci*
     | groupBy([aid])
   }, field=[aid], key=[aid], mode=inner)
 | select([aid])
 """
 
-# FCSC query: AIDs that emitted OCI container events, excluding pods (container runtime hosts)
+# FCSC query: AIDs that emitted any OCI container event, excluding pods (container runtime hosts)
+# Uses wildcard Oci* to catch all container-related events (OciContainerStarted,
+# OciContainerTelemetry, OciContainerStopped, OciContainerExec, etc.)
 _CONTAINER_HOST_QUERY = """
-(#event_simpleName=OciContainerStarted OR #event_simpleName=OciContainerTelemetry)
+#event_simpleName=Oci*
+| ProductType!=Pod
+| groupBy(aid, function=count())
+| select([aid])
+"""
+
+# FCSC query with 24h lookback: finds container hosts that emitted Oci* events in the last 24h
+# AND had a SensorHeartbeat in the billing hour. This avoids missing hosts that didn't
+# start/stop containers in the specific billing hour but are still container hosts.
+_CONTAINER_HOST_24H_QUERY = """
+#event_simpleName=Oci*
 | ProductType!=Pod
 | groupBy(aid, function=count())
 | select([aid])
@@ -390,6 +402,45 @@ def query_ngsiem_for_container_hosts(
         max_retries=max_retries,
         timeout_sequence=timeout_sequence,
         query_string=_CONTAINER_HOST_QUERY,
+    )
+
+
+def query_ngsiem_for_container_hosts_24h(
+    hour_start: str,
+    hour_end: str,
+    cid: str,
+    *,
+    client_id: str,
+    client_secret: str,
+    cloud_region: str = "us-1",
+    view_name: str = "search-all",
+    max_retries: int = 3,
+    timeout_sequence: tuple[int, ...] = (30, 60, 120),
+) -> list[str]:
+    """Query NGSIEM for FCSC container host AIDs using a 24h lookback window.
+
+    Looks back 24h from hour_end for any Oci* events to identify container hosts,
+    rather than just the 1-hour billing window. This catches hosts that are running
+    containers but didn't emit OCI events in the specific billing hour.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    # Parse hour_end and look back 24h
+    dt_end = datetime.fromisoformat(hour_end.replace("Z", "+00:00"))
+    dt_start_24h = dt_end - timedelta(hours=24)
+    lookback_start = dt_start_24h.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    return query_ngsiem_for_sensors(
+        lookback_start,
+        hour_end,
+        cid,
+        client_id=client_id,
+        client_secret=client_secret,
+        cloud_region=cloud_region,
+        view_name=view_name,
+        max_retries=max_retries,
+        timeout_sequence=timeout_sequence,
+        query_string=_CONTAINER_HOST_24H_QUERY,
     )
 
 

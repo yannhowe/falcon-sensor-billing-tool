@@ -20,6 +20,7 @@ from falcon_billing.ngsiem import (
     query_ngsiem_for_sensors,
     query_ngsiem_for_fcs,
     query_ngsiem_for_container_hosts,
+    query_ngsiem_for_container_hosts_24h,
     query_ngsiem_for_fmc,
     NgsiemQueryFailed,
 )
@@ -363,22 +364,42 @@ def process_hourly_collection(
 
     logger.info(f"Found {len(sensor_ids)} unique sensors for hour {hour_str}")
 
-    # Query FCSC — OCI container runtime hosts, ProductType!=Pod
+    # Query FCSC — OCI container runtime hosts using 24h lookback, intersected
+    # with sensors active in this billing hour. This avoids missing container hosts
+    # that didn't emit OCI events in the specific billing hour.
+    # Falls back to metadata-based classification if data is unavailable (e.g.
+    # retention period has aged out the OCI events for older billing hours).
     fcsc_count = None
+    container_ids = []
+    fcsc_from_metadata = False
     try:
         creds = load_credentials()
-        container_ids = query_ngsiem_for_container_hosts(
+        container_ids_24h = query_ngsiem_for_container_hosts_24h(
             hour_start=hour_start_iso, hour_end=hour_end_iso, cid=cid,
             client_id=creds["client_id"], client_secret=creds["client_secret"],
             cloud_region=creds["cloud_region"],
         )
+        # Intersect with sensors active in this billing hour
+        container_ids = [aid for aid in container_ids_24h if aid in sensor_ids]
         fcsc_count = len(container_ids)
-        logger.info(f"FCSC (container hosts): {fcsc_count} for hour {hour_str}")
+        if fcsc_count == 0 and len(sensor_ids) > 0:
+            # Zero OCI events could mean data aged out of retention.
+            # Fall back to metadata-based classification.
+            logger.warning(
+                "FCSC 24h lookback returned 0 container hosts but %d sensors active — "
+                "OCI event data may have aged out of retention. Falling back to metadata classification.",
+                len(sensor_ids),
+            )
+            fcsc_from_metadata = True
+        else:
+            logger.info(f"FCSC (container hosts): {fcsc_count} for hour {hour_str} (24h lookback found {len(container_ids_24h)}, {fcsc_count} active this hour)")
     except NgsiemQueryFailed:
-        logger.warning("FCSC query failed, fcsc_count will be NULL")
+        logger.warning("FCSC query failed — falling back to metadata classification")
+        fcsc_from_metadata = True
 
     # Query FMC — pod sensors, ProductType=Pod
     fmc_count = None
+    fmc_ids = []
     try:
         creds = load_credentials()
         fmc_ids = query_ngsiem_for_fmc(
@@ -391,33 +412,55 @@ def process_hourly_collection(
     except NgsiemQueryFailed:
         logger.warning("FMC query failed, fmc_count will be NULL")
 
-    # Query FCS — SensorHeartbeat, not pod, !join to exclude OCI hosts
+    # Derive FCS IDs: total sensors minus FCSC (24h lookback) minus FMC (pods)
+    # This replaces the previous NGSIEM !join anti-join which only looked at 1-hour
+    # and missed container hosts that didn't emit OCI events in that specific hour.
     fcs_ids = None
     fcs_count = None
-    try:
-        creds = load_credentials()
-        fcs_ids = query_ngsiem_for_fcs(
-            hour_start=hour_start_iso, hour_end=hour_end_iso, cid=cid,
-            client_id=creds["client_id"], client_secret=creds["client_secret"],
-            cloud_region=creds["cloud_region"],
-        )
+    container_id_set = set(container_ids) if container_ids else set()
+    fmc_id_set = set(fmc_ids) if fmc_ids else set()
+    if fcsc_count is not None and fmc_count is not None:
+        fcs_ids = [aid for aid in sensor_ids if aid not in container_id_set and aid not in fmc_id_set]
         fcs_count = len(fcs_ids)
         logger.info(f"FCS (raw, before classification): {fcs_count} for hour {hour_str}")
-    except NgsiemQueryFailed:
-        logger.warning("FCS query failed, fcs_count will be NULL")
 
     # Step 2: Enrich with host metadata (smart caching)
     if falcon_client is None:
         falcon_client = get_falcon_client()
     enriched = enrich_sensors_with_host_details(falcon_client, db, sensor_ids)
 
-    # Classify fcs_ids into FCS (VMs/servers) vs EPP (user endpoints)
-    from falcon_billing.classifier import is_cloud_vm
-    fcs_final = None
-    epp_count = None
-    if fcs_ids is not None:
+    # If OCI event data was unavailable (retention aged out, query failed),
+    # fall back to metadata-based classification for FCSC/FCS/EPP split.
+    from falcon_billing.classifier import is_cloud_vm, classify_sensor
+    if fcsc_from_metadata:
+        logger.info("Using metadata-based classification (OCI events unavailable)")
+        container_ids = []
+        fmc_ids_meta = []
+        fcs_ids = []
+        epp_ids = []
+        for aid in sensor_ids:
+            meta = enriched.get(aid, {})
+            classification = classify_sensor(
+                hostname=meta.get('hostname'),
+                platform_name=meta.get('platform_name'),
+                tags=meta.get('tags'),
+                groups=meta.get('groups'),
+            )
+            if classification == "FCSC":
+                container_ids.append(aid)
+            elif classification == "FMC":
+                fmc_ids_meta.append(aid)
+            elif classification == "FCS":
+                fcs_ids.append(aid)
+            else:
+                epp_ids.append(aid)
+        fcsc_count = len(container_ids)
+        if fmc_count is None:
+            fmc_count = len(fmc_ids_meta)
+        fcs_count = len(fcs_ids)
         fcs_final = 0
         epp_count = 0
+        # Further classify FCS into true cloud VMs vs EPP
         for aid in fcs_ids:
             meta = enriched.get(aid, {})
             if is_cloud_vm(
@@ -429,8 +472,31 @@ def process_hourly_collection(
                 fcs_final += 1
             else:
                 epp_count += 1
+        epp_count += len(epp_ids)
         fcs_count = fcs_final
-        logger.info(f"FCS (VMs/servers): {fcs_final}, EPP (endpoints): {epp_count} for hour {hour_str}")
+        logger.info(
+            f"Metadata classification: FCSC={fcsc_count}, FCS={fcs_final}, EPP={epp_count}, FMC={fmc_count} for hour {hour_str}"
+        )
+    else:
+        # Normal path: classify fcs_ids into FCS (VMs/servers) vs EPP (user endpoints)
+        fcs_final = None
+        epp_count = None
+        if fcs_ids is not None:
+            fcs_final = 0
+            epp_count = 0
+            for aid in fcs_ids:
+                meta = enriched.get(aid, {})
+                if is_cloud_vm(
+                    manufacturer=meta.get('manufacturer'),
+                    cloud_provider=meta.get('cloud_provider'),
+                    tags=meta.get('tags'),
+                    product_type_desc=meta.get('product_type_desc'),
+                ):
+                    fcs_final += 1
+                else:
+                    epp_count += 1
+            fcs_count = fcs_final
+            logger.info(f"FCS (VMs/servers): {fcs_final}, EPP (endpoints): {epp_count} for hour {hour_str}")
 
     # Tally check
     if all(v is not None for v in [fcsc_count, fmc_count, fcs_final, epp_count]):
