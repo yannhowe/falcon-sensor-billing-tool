@@ -112,12 +112,32 @@ def create_app(db_path: str = None) -> Flask:
             overall_total = 0
             overall_max = 0
 
+            # EPP uses weekly averaging (avg of daily peaks over 7 days)
+            cutoff_7d = (datetime.utcnow() - timedelta(days=7)).strftime(
+                "%Y-%m-%d %H:%M:%S"
+            )
+
             for row in cid_cursor.fetchall():
                 avg = row["total"] / collected_hours if collected_hours else 0
                 fcs_avg = row["fcs_total"] / collected_hours if collected_hours else 0
-                epp_avg = row["epp_total"] / collected_hours if collected_hours else 0
                 fcsc_avg = row["fcsc_total"] / collected_hours if collected_hours else 0
                 fmc_avg = row["fmc_total"] / collected_hours if collected_hours else 0
+
+                # EPP weekly avg: average of daily peak EPP counts over 7 days
+                epp_daily = conn.execute(
+                    "SELECT DATE(hour_timestamp) as day, "
+                    "MAX(COALESCE(epp_count, 0)) as daily_peak "
+                    "FROM hourly_counts "
+                    "WHERE hour_timestamp >= ? AND cid = ? AND epp_count IS NOT NULL "
+                    "GROUP BY DATE(hour_timestamp)",
+                    (cutoff_7d, row["cid"]),
+                ).fetchall()
+                if epp_daily:
+                    epp_avg = sum(r["daily_peak"] for r in epp_daily) / len(epp_daily)
+                else:
+                    # Fallback to hourly avg if no weekly data available
+                    epp_avg = row["epp_total"] / collected_hours if collected_hours else 0
+
                 cids.append({
                     "cid": row["cid"],
                     "avg_sensors": round(avg, 2),
@@ -330,7 +350,10 @@ def create_app(db_path: str = None) -> Flask:
         collected_hours = hours_row["total_hours"] or 1
 
         def generate_cid():
-            yield "cid,28day_avg,fcs_avg,epp_avg,fcsc_avg,fmc_avg,max_hourly,min_hourly,hours_collected,licenses_required\n"
+            yield "cid,28day_avg,fcs_avg,epp_weekly_avg,fcsc_avg,fmc_avg,max_hourly,min_hourly,hours_collected,licenses_required\n"
+            cutoff_7d = (datetime.utcnow() - timedelta(days=7)).strftime(
+                "%Y-%m-%d %H:%M:%S"
+            )
             cursor = conn.execute(
                 "SELECT cid, SUM(unique_sensor_count) as total, "
                 "SUM(COALESCE(fcs_count, 0)) as fcs_total, "
@@ -347,9 +370,21 @@ def create_app(db_path: str = None) -> Flask:
             for row in cursor:
                 avg = row["total"] / collected_hours
                 fcs_avg = row["fcs_total"] / collected_hours
-                epp_avg = row["epp_total"] / collected_hours
                 fcsc_avg = row["fcsc_total"] / collected_hours
                 fmc_avg = row["fmc_total"] / collected_hours
+                # EPP uses weekly avg (avg of daily peaks over 7 days)
+                epp_daily = conn.execute(
+                    "SELECT DATE(hour_timestamp) as day, "
+                    "MAX(COALESCE(epp_count, 0)) as daily_peak "
+                    "FROM hourly_counts "
+                    "WHERE hour_timestamp >= ? AND cid = ? AND epp_count IS NOT NULL "
+                    "GROUP BY DATE(hour_timestamp)",
+                    (cutoff_7d, row["cid"]),
+                ).fetchall()
+                if epp_daily:
+                    epp_avg = sum(r["daily_peak"] for r in epp_daily) / len(epp_daily)
+                else:
+                    epp_avg = row["epp_total"] / collected_hours
                 yield (
                     f"{_csv_safe(row['cid'])},{avg:.2f},{fcs_avg:.2f},{epp_avg:.2f},"
                     f"{fcsc_avg:.2f},{fmc_avg:.2f},{row['max_s']},"
