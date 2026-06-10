@@ -1,0 +1,957 @@
+#!/usr/bin/env python3
+"""
+Falcon Sensor Billing - Hourly Collection Logic
+
+Collects hourly sensor data from:
+1. NGSIEM (Falcon LogScale) - for accurate list of active sensors per hour
+2. Hosts API - for enrichment with host details and tags
+3. Smart caching - to minimize API calls
+
+Flow:
+1. Query NGSIEM for unique sensors active during target hour
+2. Check host_metadata_cache for each sensor
+3. Call Hosts API only for cache misses or stale entries (>24h old)
+4. Store in database with tag aggregation
+5. Verify against billing API
+"""
+
+import argparse
+import os
+import sys
+import json
+import time
+import logging
+import requests
+import subprocess
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import List, Dict, Optional, Tuple
+
+# Add FalconPy to path
+FALCONPY_PATH = Path(__file__).parent.parent.parent / "repos" / "falconpy" / "src"
+sys.path.insert(0, str(FALCONPY_PATH))
+
+try:
+    from falconpy import Hosts, OAuth2, SensorDownload
+except ImportError as e:
+    print(f"Error: Cannot import FalconPy. Make sure it's at: {FALCONPY_PATH}")
+    print(f"Import error: {e}")
+    sys.exit(1)
+
+from billing_database import BillingDatabase
+
+logger = logging.getLogger(__name__)
+
+# Cache for CID to avoid repeated API calls
+_cached_cid = None
+
+
+# ============================================================================
+# Credential Loading from Keychain
+# ============================================================================
+
+def get_keychain_value(service, account):
+    """Get credential from macOS Keychain."""
+    try:
+        result = subprocess.run(
+            ['security', 'find-generic-password', '-s', service, '-a', account, '-w'],
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        return result.stdout.strip()
+    except subprocess.CalledProcessError:
+        return None
+
+def load_credentials_from_keychain():
+    """Load Falcon API credentials from keychain and set environment variables."""
+    # Hardcode profile to talon_1
+    profile = 'talon_1'
+
+    client_id = get_keychain_value('falcon-client-id', profile)
+    client_secret = get_keychain_value('falcon-client-secret', profile)
+    region = get_keychain_value('falcon-cloud-region', profile) or 'us-1'
+
+    if client_id and client_secret:
+        os.environ['FALCON_CLIENT_ID'] = client_id
+        os.environ['FALCON_CLIENT_SECRET'] = client_secret
+        os.environ['FALCON_CLOUD_REGION'] = region
+        return True
+    return False
+
+
+# ============================================================================
+# Gap Detection Functions
+# ============================================================================
+
+def get_hours_to_collect(days_back: int, db) -> List[datetime]:
+    """
+    Determine which hours need collection.
+
+    Rules:
+    - Always skip current incomplete hour
+    - End at previous complete hour
+    - Check database for existing hours
+    - Return only missing hours
+
+    Args:
+        days_back: Number of days to look back
+        db: BillingDatabase instance
+
+    Returns:
+        List of datetime objects for missing hours
+    """
+    now = datetime.now(timezone.utc)
+    current_hour = now.replace(minute=0, second=0, microsecond=0)
+
+    # Skip current hour (incomplete), end at previous complete hour
+    end_hour = current_hour - timedelta(hours=1)
+    start_hour = end_hour - timedelta(days=days_back) + timedelta(hours=1)
+
+    logger.info(f"Date range: {start_hour} to {end_hour}")
+
+    # Query existing hours from database
+    with db.get_connection() as conn:
+        cursor = conn.execute("""
+            SELECT DISTINCT hour_timestamp
+            FROM sensor_logs
+            WHERE hour_timestamp >= ? AND hour_timestamp <= ?
+        """, (start_hour.isoformat(), end_hour.isoformat()))
+        existing = {row[0] for row in cursor.fetchall()}
+
+    # Generate all hours in range
+    all_hours = []
+    hour = start_hour
+    while hour <= end_hour:
+        all_hours.append(hour)
+        hour += timedelta(hours=1)
+
+    # Filter to missing hours only
+    missing_hours = [h for h in all_hours if h.isoformat() not in existing]
+
+    logger.info(f"Total hours in range: {len(all_hours)}")
+    logger.info(f"Already collected: {len(existing)}")
+    logger.info(f"Missing hours to collect: {len(missing_hours)}")
+
+    return missing_hours
+
+
+# ============================================================================
+# NGSIEM Query Functions
+# ============================================================================
+
+def query_ngsiem_for_sensors(
+    hour_start: datetime,
+    hour_end: datetime,
+    cid: Optional[str] = None
+) -> List[str]:
+    """
+    Query NGSIEM/LogScale for unique sensors active during target hour.
+
+    Uses heartbeat events (AgentOnline, ProcessRollup2, etc.) to identify
+    all sensors that were active during the clock hour.
+
+    Args:
+        hour_start: Start of clock hour (inclusive)
+        hour_end: End of clock hour (exclusive)
+        cid: Optional child CID filter
+
+    Returns:
+        list: Unique sensor IDs (agent IDs) active during hour
+
+    Raises:
+        PermissionError: If API client missing ngsiem:read scope
+        RuntimeError: If query fails
+    """
+    # Get credentials from environment
+    client_id = os.environ.get('FALCON_CLIENT_ID')
+    client_secret = os.environ.get('FALCON_CLIENT_SECRET')
+    region = os.environ.get('FALCON_CLOUD_REGION', 'us-1')
+
+    if not client_id or not client_secret:
+        raise ValueError("Falcon credentials not set in environment")
+
+    # Build base URL based on region
+    if region == 'us-1':
+        base_url = 'https://api.crowdstrike.com'
+    else:
+        base_url = f'https://api.{region}.crowdstrike.com'
+
+    # Get OAuth2 token
+    auth = OAuth2(
+        client_id=client_id,
+        client_secret=client_secret,
+        base_url=base_url
+    )
+
+    token_result = auth.token()
+    if isinstance(token_result, dict):
+        # Extract access token from response
+        if 'body' in token_result and isinstance(token_result['body'], dict):
+            access_token = token_result['body'].get('access_token')
+        elif 'access_token' in token_result:
+            access_token = token_result['access_token']
+        else:
+            raise RuntimeError("Failed to extract access token from OAuth2 response")
+    else:
+        raise RuntimeError("OAuth2 token() returned unexpected format")
+
+    # Build NGSIEM query endpoint
+    view_name = "search-all"  # Query all events
+    endpoint = f"{base_url}/humio/api/v1/repositories/{view_name}/queryjobs"
+
+    # Format timestamps for LogScale (milliseconds since epoch)
+    start_ms = int(hour_start.timestamp() * 1000)
+    end_ms = int(hour_end.timestamp() * 1000)
+
+    # Build LogScale query
+    # Query for common heartbeat events and group by agent ID
+    query = """
+#event_simpleName=AgentOnline OR #event_simpleName=ProcessRollup2 OR #event_simpleName=UserLogon
+| groupBy(aid, function=count())
+| select([aid])
+"""
+
+    # Prepare request
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json"
+    }
+
+    body = {
+        "queryString": query,
+        "start": start_ms,
+        "end": end_ms,
+        "isLive": False  # Historical query, not live tail
+    }
+
+    logger.info(f"Querying NGSIEM for sensors active between {hour_start} and {hour_end}")
+
+    # Submit query job
+    try:
+        response = requests.post(endpoint, headers=headers, json=body, timeout=30)
+
+        if response.status_code == 403:
+            raise PermissionError(
+                f"NGSIEM query failed (403): Permission denied\n"
+                f"SOLUTION: Add 'ngsiem:read' or 'ngsiem:write' scope to your Falcon API client\n"
+                f"See API_SCOPES.md for instructions."
+            )
+
+        if response.status_code != 200:
+            error_msg = response.text
+            raise RuntimeError(f"NGSIEM query submission failed ({response.status_code}): {error_msg}")
+
+        # Get query job ID
+        job_data = response.json()
+        job_id = job_data.get("id")
+
+        if not job_id:
+            raise RuntimeError(f"No job ID returned from NGSIEM: {job_data}")
+
+        logger.info(f"NGSIEM query job submitted: {job_id}")
+
+        # Poll for results
+        poll_url = f"{endpoint}/{job_id}"
+        max_polls = 120  # 120 seconds max wait
+        poll_interval = 1  # seconds
+
+        for attempt in range(max_polls):
+            time.sleep(poll_interval)
+
+            poll_response = requests.get(poll_url, headers=headers, timeout=10)
+
+            if poll_response.status_code != 200:
+                raise RuntimeError(f"NGSIEM poll failed ({poll_response.status_code}): {poll_response.text}")
+
+            poll_data = poll_response.json()
+            state = poll_data.get("state", "UNKNOWN")
+            done = poll_data.get("done", False)
+            cancelled = poll_data.get("cancelled", False)
+
+            if done and not cancelled:
+                # Query complete - extract sensor IDs
+                events = poll_data.get("events", [])
+
+                sensor_ids = []
+                for event in events:
+                    aid = event.get("aid")
+                    if aid:
+                        sensor_ids.append(aid)
+
+                logger.info(f"NGSIEM query complete: Found {len(sensor_ids)} unique sensors")
+                return sensor_ids
+
+            elif cancelled:
+                error = poll_data.get("error", "Query was cancelled")
+                raise RuntimeError(f"NGSIEM query cancelled: {error}")
+
+            elif state == "FAILED":
+                error = poll_data.get("error", "Unknown error")
+                raise RuntimeError(f"NGSIEM query failed: {error}")
+
+            # Still running - log progress every 10 seconds
+            if attempt > 0 and attempt % 10 == 0:
+                logger.info(f"NGSIEM query still running... ({attempt}s)")
+
+        raise TimeoutError(f"NGSIEM query timed out after {max_polls} seconds")
+
+    except PermissionError:
+        # Re-raise permission errors with fallback message
+        logger.error("NGSIEM query failed: Missing API scope")
+        logger.warning("Falling back to Hosts API - this may be less accurate")
+        raise
+
+    except Exception as e:
+        logger.error(f"NGSIEM query failed: {e}")
+        logger.warning("Will fall back to Hosts API")
+        raise
+
+
+def query_hosts_api_for_active_sensors(
+    falcon_client: Hosts,
+    hour_start: datetime,
+    hour_end: datetime,
+    cid: Optional[str] = None
+) -> List[str]:
+    """
+    Fallback: Query Hosts API for sensors with last_seen in target hour.
+
+    This is less accurate than NGSIEM because:
+    - last_seen is the most recent check-in, not all check-ins
+    - Hosts API may not show sensors that went offline
+    - Pagination limit of 5000 devices
+
+    Args:
+        falcon_client: FalconPy Hosts client
+        hour_start: Start of hour
+        hour_end: End of hour
+        cid: Optional child CID filter
+
+    Returns:
+        list: Sensor IDs with last_seen in target hour
+    """
+    sensor_ids = []
+
+    # Build filter for last_seen in target hour
+    # FQL filter format: last_seen:>'2026-04-14T14:00:00Z'+last_seen:<'2026-04-14T15:00:00Z'
+    hour_start_str = hour_start.strftime('%Y-%m-%dT%H:%M:%SZ')
+    hour_end_str = hour_end.strftime('%Y-%m-%dT%H:%M:%SZ')
+
+    filter_parts = [
+        f"last_seen:>'{hour_start_str}'",
+        f"last_seen:<'{hour_end_str}'"
+    ]
+
+    # Note: Don't add CID filter for single-tenant (non-Flight Control)
+    # Only Flight Control parent CIDs can filter by child CID
+    # For single-tenant, the API automatically returns sensors for the authenticated CID
+
+    fql_filter = '+'.join(filter_parts)
+
+    try:
+        # Query for device IDs
+        offset = 0
+        limit = 5000  # Max allowed by API
+
+        while True:
+            response = falcon_client.query_devices_by_filter(
+                filter=fql_filter,
+                offset=offset,
+                limit=limit
+            )
+
+            if response['status_code'] != 200:
+                error_msg = response.get('body', {}).get('errors', ['Unknown error'])
+                logger.error(f"Failed to query devices: {error_msg}")
+                break
+
+            device_ids = response['body'].get('resources', [])
+            if not device_ids:
+                break
+
+            sensor_ids.extend(device_ids)
+            logger.info(f"Retrieved {len(device_ids)} devices (offset {offset})")
+
+            # Check if there are more results
+            total = response['body'].get('meta', {}).get('pagination', {}).get('total', 0)
+            offset += len(device_ids)
+            if offset >= total:
+                break
+
+        logger.info(f"Total sensors found with last_seen in target hour: {len(sensor_ids)}")
+        return sensor_ids
+
+    except Exception as e:
+        logger.error(f"Failed to query Hosts API: {e}")
+        return []
+
+
+# ============================================================================
+# Host Enrichment Functions
+# ============================================================================
+
+def enrich_sensors_with_host_details(
+    falcon_client: Hosts,
+    db: BillingDatabase,
+    sensor_ids: List[str]
+) -> Dict[str, Dict]:
+    """
+    Enrich sensor IDs with host metadata using smart caching.
+
+    Cache strategy:
+    1. Check cache for each sensor_id (24h TTL)
+    2. Separate into cached (hit) and need_refresh (miss/stale)
+    3. Batch API calls for need_refresh in groups of 100
+    4. Update cache with fresh data
+    5. Return combined results
+
+    Args:
+        falcon_client: FalconPy Hosts client
+        db: BillingDatabase instance
+        sensor_ids: List of sensor IDs to enrich
+
+    Returns:
+        dict: Mapping of sensor_id -> host_details
+    """
+    if not sensor_ids:
+        return {}
+
+    enriched = {}
+    need_refresh = []
+
+    # Check cache for each sensor
+    for sensor_id in sensor_ids:
+        cached = db.get_cached_host(sensor_id, max_age_hours=24)
+        if cached:
+            enriched[sensor_id] = cached
+        else:
+            need_refresh.append(sensor_id)
+
+    # Log cache statistics
+    hits = len(enriched)
+    misses = len(need_refresh)
+    hit_rate = (hits / len(sensor_ids)) * 100 if sensor_ids else 0
+    logger.info(f"Cache stats: {hits} hits, {misses} misses ({hit_rate:.1f}% hit rate)")
+
+    # Fetch missing/stale hosts from API in batches of 100
+    if need_refresh:
+        batch_size = 100
+        for i in range(0, len(need_refresh), batch_size):
+            batch = need_refresh[i:i + batch_size]
+            logger.info(f"Fetching host details for {len(batch)} sensors (batch {i//batch_size + 1})")
+
+            try:
+                response = falcon_client.get_device_details(ids=batch)
+
+                if response['status_code'] != 200:
+                    error_msg = response.get('body', {}).get('errors', ['Unknown error'])
+                    logger.error(f"Failed to get device details: {error_msg}")
+                    continue
+
+                resources = response['body'].get('resources', [])
+
+                # Parse host details
+                host_details = []
+                for resource in resources:
+                    host_data = {
+                        'sensor_id': resource.get('device_id'),
+                        'hostname': resource.get('hostname'),
+                        'platform_name': resource.get('platform_name'),
+                        'platform_version': resource.get('platform_version'),
+                        'os_version': resource.get('os_version'),
+                        'status': resource.get('status'),
+                        'last_seen': resource.get('last_seen'),
+                        'groups': resource.get('groups', []),
+                        'tags': resource.get('tags', []),
+                        'cid': resource.get('cid', 'default')
+                    }
+                    host_details.append(host_data)
+                    enriched[host_data['sensor_id']] = host_data
+
+                # Update cache with fresh data
+                if host_details:
+                    db.update_host_cache(host_details)
+                    logger.info(f"Updated cache for {len(host_details)} hosts")
+
+            except Exception as e:
+                logger.error(f"Failed to fetch host details batch: {e}")
+                continue
+
+    return enriched
+
+
+# ============================================================================
+# Collection Functions
+# ============================================================================
+
+def process_hourly_collection(
+    db: BillingDatabase,
+    hour: datetime,
+    cid: Optional[str] = None,
+    falcon_client: Optional[Hosts] = None
+) -> Tuple[int, int, int]:
+    """
+    Process hourly sensor collection for a specific clock hour.
+
+    Workflow:
+    1. Query NGSIEM for active sensors (fallback to Hosts API if unavailable)
+    2. Enrich with host metadata using smart caching
+    3. Store in sensor_logs table
+    4. Calculate and store hourly_counts
+    5. Aggregate and store hourly_tag_counts
+    6. Return metrics
+
+    Args:
+        db: BillingDatabase instance
+        hour: Target clock hour to collect
+        cid: Optional child CID
+        falcon_client: FalconPy Hosts client (only needed if NGSIEM unavailable)
+
+    Returns:
+        tuple: (total_sensors, cache_hits, api_calls)
+    """
+    # Get actual CID from API if not provided
+    if not cid or cid == 'default':
+        cid = get_falcon_cid()
+
+    hour_str = hour.strftime('%Y-%m-%d %H:00:00')
+    hour_end = hour + timedelta(hours=1)
+
+    logger.info(f"Processing collection for hour: {hour_str} (CID: {cid})")
+
+    # Step 1: Query for active sensors
+    # Try NGSIEM first, fall back to Hosts API if NGSIEM fails
+    sensor_ids = []
+
+    try:
+        logger.info("Attempting NGSIEM query for accurate sensor tracking...")
+        sensor_ids = query_ngsiem_for_sensors(hour, hour_end, cid)
+        logger.info(f"✓ NGSIEM query successful: {len(sensor_ids)} sensors")
+
+    except PermissionError as e:
+        logger.warning(f"NGSIEM permission denied: {e}")
+        logger.warning("Falling back to Hosts API (less accurate)")
+        if not falcon_client:
+            raise ValueError("falcon_client is required when NGSIEM is unavailable (missing ngsiem:read scope)")
+        sensor_ids = query_hosts_api_for_active_sensors(falcon_client, hour, hour_end, cid)
+
+    except Exception as e:
+        logger.warning(f"NGSIEM query failed: {e}")
+        logger.warning("Falling back to Hosts API (less accurate)")
+        if not falcon_client:
+            raise ValueError("falcon_client is required when NGSIEM query fails")
+        sensor_ids = query_hosts_api_for_active_sensors(falcon_client, hour, hour_end, cid)
+
+    if not sensor_ids:
+        logger.warning(f"No sensors found for hour {hour_str}")
+        # Still record zero count
+        db.insert_hourly_count(hour_str, 0, cid)
+        return 0, 0, 0
+
+    logger.info(f"Found {len(sensor_ids)} unique sensors for hour {hour_str}")
+
+    # Step 2: Enrich with host metadata (smart caching)
+    enriched = enrich_sensors_with_host_details(falcon_client, db, sensor_ids)
+
+    # Calculate cache metrics
+    cache_hits, cache_misses, hit_rate = db.cache_hit_rate(sensor_ids, max_age_hours=24)
+    api_calls = cache_misses
+
+    # Step 3: Bulk insert into sensor_logs
+    sensors_to_insert = []
+    for sensor_id in sensor_ids:
+        if sensor_id in enriched:
+            sensors_to_insert.append(enriched[sensor_id])
+        else:
+            # Sensor not enriched (API failure) - store minimal data
+            logger.warning(f"Sensor {sensor_id} not enriched, storing minimal data")
+            sensors_to_insert.append({
+                'sensor_id': sensor_id,
+                'hostname': None,
+                'platform_name': None,
+                'platform_version': None,
+                'os_version': None,
+                'status': None,
+                'last_seen': None,
+                'groups': [],
+                'tags': [],
+                'cid': cid
+            })
+
+    db.insert_sensor_logs(hour_str, sensors_to_insert, cid)
+    logger.info(f"Inserted {len(sensors_to_insert)} sensor logs")
+
+    # Step 4: Calculate and store hourly count
+    unique_count = len(sensor_ids)
+    db.insert_hourly_count(hour_str, unique_count, cid)
+    logger.info(f"Stored hourly count: {unique_count} sensors")
+
+    # Step 5: Aggregate tag counts
+    db.aggregate_tag_counts(hour_str, cid)
+    logger.info(f"Aggregated tag counts for hour {hour_str}")
+
+    # Return metrics
+    return unique_count, cache_hits, api_calls
+
+
+# ============================================================================
+# Verification Functions
+# ============================================================================
+
+def verify_billing_accuracy(
+    db: BillingDatabase,
+    date: str,
+    cid: str = 'default'
+) -> Tuple[float, float, float, bool]:
+    """
+    Verify calculated 28-day average matches billing API.
+
+    Args:
+        db: BillingDatabase instance
+        date: Date to verify (YYYY-MM-DD)
+        cid: Child CID or 'default'
+
+    Returns:
+        tuple: (calculated_avg, api_avg, diff_pct, passed)
+    """
+    # Calculate 28-day average from hourly_counts
+    calculated_avg = db.calculate_28day_average(date, cid)
+
+    # Query billing API data
+    billing_data = db.get_billing_average(date, cid)
+
+    if not billing_data:
+        logger.warning(f"No billing API data found for {date}")
+        return calculated_avg, 0.0, 0.0, False
+
+    # Use managed_containers as reference (primary billing number)
+    api_avg = billing_data.get('managed_containers', 0) or 0
+
+    # Calculate difference percentage
+    if api_avg > 0:
+        diff = calculated_avg - api_avg
+        diff_pct = (diff / api_avg) * 100
+    else:
+        diff = calculated_avg
+        diff_pct = 100.0 if calculated_avg > 0 else 0.0
+
+    # Pass if within 1%
+    passed = abs(diff_pct) < 1.0
+
+    if not passed:
+        logger.warning(
+            f"Verification FAILED for {date}: "
+            f"calculated={calculated_avg:.2f}, api={api_avg:.2f}, "
+            f"diff={diff_pct:.2f}%"
+        )
+    else:
+        logger.info(
+            f"Verification PASSED for {date}: "
+            f"calculated={calculated_avg:.2f}, api={api_avg:.2f}, "
+            f"diff={diff_pct:.2f}%"
+        )
+
+    return calculated_avg, api_avg, diff_pct, passed
+
+
+def verify_tag_counts(
+    db: BillingDatabase,
+    hour: datetime,
+    cid: str = 'default'
+) -> Tuple[bool, List[str]]:
+    """
+    Verify tag counts don't exceed total count for the hour.
+
+    Args:
+        db: BillingDatabase instance
+        hour: Hour to verify
+        cid: Child CID or 'default'
+
+    Returns:
+        tuple: (passed, list of errors)
+    """
+    hour_str = hour.strftime('%Y-%m-%d %H:00:00')
+    errors = []
+
+    # Get total count for hour
+    hourly_counts = db.get_hourly_counts_for_range(hour_str, hour_str, cid)
+    if not hourly_counts:
+        errors.append(f"No hourly count found for {hour_str}")
+        return False, errors
+
+    total_count = hourly_counts[0]['unique_sensor_count']
+
+    # Get all tag counts for hour
+    tag_counts = db.get_tag_counts_for_range(hour_str, hour_str, cid=cid)
+
+    # Verify no tag count exceeds total
+    for tag_count in tag_counts:
+        tag = tag_count['tag']
+        count = tag_count['unique_sensor_count']
+        if count > total_count:
+            errors.append(
+                f"Tag '{tag}' count ({count}) exceeds total count ({total_count})"
+            )
+
+    passed = len(errors) == 0
+
+    if not passed:
+        logger.warning(f"Tag count verification FAILED for {hour_str}: {errors}")
+    else:
+        logger.info(f"Tag count verification PASSED for {hour_str}")
+
+    return passed, errors
+
+
+def generate_verification_report(
+    db: BillingDatabase,
+    start_date: str,
+    end_date: str,
+    output_path: Optional[str] = None,
+    cid: str = 'default'
+) -> str:
+    """
+    Generate daily verification report comparing calculated vs API values.
+
+    Args:
+        db: BillingDatabase instance
+        start_date: Start date (YYYY-MM-DD)
+        end_date: End date (YYYY-MM-DD)
+        output_path: Optional output path (default: auto-generated)
+        cid: Child CID or 'default'
+
+    Returns:
+        str: Path to generated report
+    """
+    if not output_path:
+        output_dir = Path(__file__).parent / "verification_reports"
+        output_dir.mkdir(exist_ok=True)
+        output_path = output_dir / f"verification_{start_date}_{end_date}.csv"
+
+    # Generate report data
+    import csv
+    from datetime import datetime, timedelta
+
+    start_dt = datetime.strptime(start_date, '%Y-%m-%d')
+    end_dt = datetime.strptime(end_date, '%Y-%m-%d')
+
+    results = []
+    current_dt = start_dt
+
+    while current_dt <= end_dt:
+        date_str = current_dt.strftime('%Y-%m-%d')
+        calculated, api, diff_pct, passed = verify_billing_accuracy(db, date_str, cid)
+
+        results.append({
+            'date': date_str,
+            'calculated_avg': f"{calculated:.2f}",
+            'api_avg': f"{api:.2f}",
+            'diff': f"{calculated - api:.2f}",
+            'diff_pct': f"{diff_pct:.2f}%",
+            'status': 'PASS' if passed else 'FAIL'
+        })
+
+        current_dt += timedelta(days=1)
+
+    # Write CSV
+    with open(output_path, 'w', newline='') as csvfile:
+        fieldnames = ['date', 'calculated_avg', 'api_avg', 'diff', 'diff_pct', 'status']
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(results)
+
+    logger.info(f"Verification report written to {output_path}")
+    return str(output_path)
+
+
+# ============================================================================
+# Credential Helper
+# ============================================================================
+
+def get_falcon_client() -> Hosts:
+    """
+    Create FalconPy Hosts client using credentials from environment.
+
+    Credentials are set by /cid skill which loads from macOS Keychain.
+
+    Returns:
+        Hosts: FalconPy Hosts client
+    """
+    client_id = os.environ.get('FALCON_CLIENT_ID')
+    client_secret = os.environ.get('FALCON_CLIENT_SECRET')
+    region = os.environ.get('FALCON_CLOUD_REGION', 'us-1')
+
+    if not client_id or not client_secret:
+        print("\n⚠️  Falcon credentials not loaded!")
+        print("\nUse the /cid skill to select a profile:")
+        print("  /cid use <profile>")
+        sys.exit(1)
+
+    # Build base URL
+    if region == 'us-1':
+        base_url = 'https://api.crowdstrike.com'
+    else:
+        base_url = f'https://api.{region}.crowdstrike.com'
+
+    # Create OAuth2 client
+    auth = OAuth2(
+        client_id=client_id,
+        client_secret=client_secret,
+        base_url=base_url
+    )
+
+    # Create Hosts client
+    return Hosts(auth_object=auth)
+
+
+def get_falcon_cid() -> str:
+    """
+    Get the actual CID (Customer ID) from Falcon API.
+
+    Caches the result to avoid repeated API calls.
+
+    Returns:
+        str: CID in format "32hexchars-2charChecksum" (e.g., "5DDB0407BEF249C19C7A975F17979A1F-90")
+    """
+    global _cached_cid
+
+    if _cached_cid:
+        return _cached_cid
+
+    client_id = os.environ.get('FALCON_CLIENT_ID')
+    client_secret = os.environ.get('FALCON_CLIENT_SECRET')
+    region = os.environ.get('FALCON_CLOUD_REGION', 'us-1')
+
+    if not client_id or not client_secret:
+        logger.warning("Falcon credentials not set, using 'default' as CID")
+        return 'default'
+
+    # Build base URL
+    if region == 'us-1':
+        base_url = 'https://api.crowdstrike.com'
+    else:
+        base_url = f'https://api.{region}.crowdstrike.com'
+
+    try:
+        # Create auth
+        auth = OAuth2(
+            client_id=client_id,
+            client_secret=client_secret,
+            base_url=base_url
+        )
+
+        # Get CID using SensorDownload API
+        sensor_download = SensorDownload(auth_object=auth)
+        response = sensor_download.get_sensor_installer_ccid()
+
+        if response['status_code'] == 200 and response['body']['resources']:
+            _cached_cid = response['body']['resources'][0]
+            logger.info(f"Retrieved CID from Falcon API: {_cached_cid[:16]}...{_cached_cid[-2:]}")
+            return _cached_cid
+        else:
+            logger.warning(f"Failed to retrieve CID from API: {response.get('body', {}).get('errors')}")
+            return 'default'
+
+    except Exception as e:
+        logger.warning(f"Error retrieving CID from API: {e}")
+        return 'default'
+
+
+def main():
+    """Main entry point."""
+    # Parse arguments
+    parser = argparse.ArgumentParser(
+        description='Falcon Sensor Billing - Hourly Collection'
+    )
+    parser.add_argument(
+        '--days',
+        type=int,
+        default=0,
+        help='Collect last N days of data (0=current hour only, default)'
+    )
+    args = parser.parse_args()
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+
+    print("Falcon Sensor Billing - Collection Module")
+    print("=" * 70)
+
+    # Load credentials from keychain
+    if not load_credentials_from_keychain():
+        print()
+        print("Falcon credentials not loaded!")
+        print()
+        print("Use the /cid skill to select a profile:")
+        print("  /cid use <profile>")
+        sys.exit(1)
+
+    # Initialize database
+    db = BillingDatabase()
+    print(f"Database initialized at {db.db_path}")
+
+    # Get Falcon client
+    try:
+        falcon_client = get_falcon_client()
+        print(f"Falcon API client initialized")
+    except Exception as e:
+        print(f"Failed to initialize Falcon client: {e}")
+        sys.exit(1)
+
+    # Get actual CID
+    actual_cid = get_falcon_cid()
+    print(f"Using CID: {actual_cid[:16]}...{actual_cid[-2:]}")
+
+    # Determine hours to collect
+    if args.days == 0:
+        # Single hour mode: collect previous complete hour
+        target_hour = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0) - timedelta(hours=1)
+        hours_to_collect = [target_hour]
+        print(f"\nTesting collection for hour: {target_hour}")
+    else:
+        # Multi-day backfill mode
+        print(f"\nBackfill mode: Last {args.days} days")
+        hours_to_collect = get_hours_to_collect(args.days, db)
+        print()
+
+        if not hours_to_collect:
+            print("No missing hours found - database is up to date")
+            return
+
+    # Collect each hour
+    for i, hour_start in enumerate(hours_to_collect, 1):
+        if len(hours_to_collect) > 1:
+            print(f"[{i}/{len(hours_to_collect)}] Collecting hour: {hour_start}")
+
+        try:
+            total, cache_hits, api_calls = process_hourly_collection(
+                db, hour_start, cid=actual_cid, falcon_client=falcon_client
+            )
+
+            if len(hours_to_collect) > 1:
+                print(f"  Collected {total} sensors")
+            else:
+                print(f"\nCollection complete:")
+                print(f"  Total sensors: {total}")
+                print(f"  Cache hits: {cache_hits}")
+                print(f"  API calls: {api_calls}")
+
+        except Exception as e:
+            print(f"  Collection failed for {hour_start}: {e}")
+            import traceback
+            traceback.print_exc()
+            if len(hours_to_collect) == 1:
+                sys.exit(1)
+            continue
+
+    # Final summary for multi-day mode
+    if args.days > 0:
+        print()
+        print(f"Backfill complete: {len(hours_to_collect)} hours collected")
+
+
+if __name__ == "__main__":
+    main()

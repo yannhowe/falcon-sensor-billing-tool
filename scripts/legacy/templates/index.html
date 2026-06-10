@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
+    <title>Falcon Sensor Billing Dashboard</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}?v=4">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+</head>
+<body>
+    <header>
+        <h1>🦅 Falcon Sensor Billing Dashboard</h1>
+        <p class="subtitle">Real-time sensor usage tracking and billing analysis</p>
+    </header>
+
+    <main>
+        <!-- Product Classification Cards -->
+        <section class="stats-grid">
+            <div class="stat-card" style="border-left: 4px solid #2196F3;">
+                <div class="stat-icon">🐳</div>
+                <div class="stat-content">
+                    <h3>FCSC 28 Day Avg</h3>
+                    <p class="stat-value" id="fcsc-avg" style="color: #2196F3;">-</p>
+                    <small id="fcsc-count">- Unique Hosts</small>
+                </div>
+            </div>
+
+            <div class="stat-card" style="border-left: 4px solid #FF5722;">
+                <div class="stat-icon">🚀</div>
+                <div class="stat-content">
+                    <h3>FMC 28 Day Avg</h3>
+                    <p class="stat-value" id="fmc-avg" style="color: #FF5722;">-</p>
+                    <small id="fmc-count">- Unique Hosts</small>
+                </div>
+            </div>
+
+            <div class="stat-card" style="border-left: 4px solid #4CAF50;">
+                <div class="stat-icon">☁️</div>
+                <div class="stat-content">
+                    <h3>FCS 28 Day Avg</h3>
+                    <p class="stat-value" id="fcs-avg" style="color: #4CAF50;">-</p>
+                    <small id="fcs-count">- Unique Hosts</small>
+                </div>
+            </div>
+
+            <div class="stat-card" style="border-left: 4px solid #9C27B0;">
+                <div class="stat-icon">💻</div>
+                <div class="stat-content">
+                    <h3>EPP 28 Day Avg</h3>
+                    <p class="stat-value" id="epp-avg" style="color: #9C27B0;">-</p>
+                    <small id="epp-count">- Unique Hosts</small>
+                </div>
+            </div>
+        </section>
+
+        <!-- Date Range Info -->
+        <section class="info-bar">
+            <p>📊 Total 28-Day Avg: <strong id="avg-28day">-</strong> sensors (billing number)</p>
+            <p>📅 Data Range: <strong id="date-range">-</strong></p>
+            <p>⏱️ Hours Collected: <strong id="total-hours">-</strong></p>
+        </section>
+
+        <!-- Licensing Compliance Status -->
+        <section class="compliance-status" id="compliance-section">
+            <div class="section-header">
+                <h2>✅ License Compliance Status</h2>
+                <div class="license-filter">
+                    <label for="reserved-hourly-avg">Reserved Hourly Avg:</label>
+                    <input type="number" id="reserved-hourly-avg" value="250" min="0" placeholder="0">
+                    <button onclick="calculateCompliance()" class="btn btn-primary">Calculate</button>
+                </div>
+            </div>
+            <div class="compliance-summary">
+                <div class="compliance-card" id="compliance-card">
+                    <div class="status-icon" id="status-icon">⏳</div>
+                    <div class="status-content">
+                        <h3 id="compliance-status">Calculating...</h3>
+                        <p id="compliance-message">-</p>
+                    </div>
+                </div>
+            </div>
+
+            <div class="compliance-details">
+                <div class="detail-card">
+                    <h4>Peak 28 Day Average</h4>
+                    <p class="big-number" id="rolling-avg">-</p>
+                    <small id="reserved-limit-text">vs - reserved</small>
+                </div>
+                <div class="detail-card">
+                    <h4>Max Hourly Usage</h4>
+                    <p class="big-number" id="max-usage">-</p>
+                    <small>Peak hour in period</small>
+                </div>
+                <div class="detail-card">
+                    <h4>% Hours Over Reserved</h4>
+                    <p class="big-number" id="hours-over-pct">-</p>
+                    <small id="hours-over-detail">-</small>
+                </div>
+            </div>
+
+            <div class="chart-container">
+                <h3>Hourly Compliance (Last 7 Days)</h3>
+                <canvas id="compliance-chart"></canvas>
+            </div>
+        </section>
+
+        <!-- Product Trend Chart -->
+        <section class="data-section">
+            <h2>📦 Product Breakdown Trend (Last 7 Days)</h2>
+            <p style="color: var(--text-secondary); margin-bottom: 1rem;">
+                Hourly sensor count by product type over time.
+                <strong>FCSC</strong> = Container Hosts (K8s, Docker) |
+                <strong>FMC</strong> = Fargate/Sidecars |
+                <strong>FCS</strong> = Cloud VMs |
+                <strong>EPP</strong> = Traditional Endpoints
+            </p>
+            <div class="chart-container">
+                <canvas id="product-trend-chart"></canvas>
+            </div>
+        </section>
+
+        <!-- Controls -->
+        <section class="controls">
+            <div class="control-group">
+                <label for="days-selector">Time Range:</label>
+                <select id="days-selector">
+                    <option value="1">Last 24 hours</option>
+                    <option value="3">Last 3 days</option>
+                    <option value="7" selected>Last 7 days</option>
+                    <option value="14">Last 14 days</option>
+                    <option value="28">Last 28 days</option>
+                </select>
+            </div>
+
+            <div class="control-group">
+                <label>Export:</label>
+                <button onclick="exportData('hourly')" class="btn">📄 Hourly CSV</button>
+                <button onclick="exportData('daily')" class="btn">📊 Daily CSV</button>
+                <button onclick="exportData('tags')" class="btn">🏷️ Tags CSV</button>
+                <button onclick="exportData('sensors')" class="btn">🖥️ Sensors CSV</button>
+            </div>
+        </section>
+
+        <!-- Charts -->
+        <section class="charts">
+            <div class="chart-container">
+                <h2>Hourly Sensor Count Trend</h2>
+                <canvas id="hourly-chart"></canvas>
+            </div>
+
+            <div class="chart-container">
+                <h2>Daily Average Comparison</h2>
+                <canvas id="daily-chart"></canvas>
+            </div>
+        </section>
+
+        <!-- Cloud Provider Breakdown -->
+        <section class="data-section">
+            <h2>☁️ Billing by Cloud Provider (28-Day Average)</h2>
+            <p style="color: var(--text-secondary); margin-bottom: 1rem;">
+                Sensor distribution across cloud providers and on-premise environments by product type.
+            </p>
+            <div class="table-container">
+                <table id="cloud-table" class="sortable-table">
+                    <thead>
+                        <tr>
+                            <th data-sort="string">Cloud Provider ⇅</th>
+                            <th data-sort="number">Unique Sensors ⇅</th>
+                            <th data-sort="number">Total Avg ⇅</th>
+                            <th data-sort="number">FCS Avg ⇅</th>
+                            <th data-sort="number">FCSC Avg ⇅</th>
+                            <th data-sort="number">FMC Avg ⇅</th>
+                            <th data-sort="number">EPP Avg ⇅</th>
+                            <th data-sort="number">% of Total ⇅</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td colspan="8" class="loading">Loading...</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- Tag Breakdown -->
+        <section class="data-section">
+            <h2>Billing by Tag (28-Day Average)</h2>
+            <div class="table-controls">
+                <input type="text" id="tag-filter" placeholder="Filter tags..." class="filter-input">
+            </div>
+            <div class="table-container">
+                <table id="tag-table" class="sortable-table">
+                    <thead>
+                        <tr>
+                            <th data-sort="string">Tag ⇅</th>
+                            <th data-sort="number">Avg Sensors ⇅</th>
+                            <th data-sort="number">Hours Active ⇅</th>
+                            <th data-sort="number">% of Total ⇅</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td colspan="4" class="loading">Loading...</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- Recent Sensors -->
+        <section class="data-section">
+            <div class="section-header" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
+                <h2 style="margin: 0;">Recently Active Sensors</h2>
+                <input type="text" id="sensor-filter" placeholder="Filter sensors..." class="filter-input" style="max-width: 300px;">
+            </div>
+            <div class="table-container">
+                <table id="sensors-table" class="sortable-table">
+                    <thead>
+                        <tr>
+                            <th data-sort="string">Hostname ⇅</th>
+                            <th data-sort="string">Platform ⇅</th>
+                            <th data-sort="string">Tags ⇅</th>
+                            <th data-sort="string">Last Seen ⇅</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td colspan="4" class="loading">Loading...</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+    </main>
+
+    <footer>
+        <p>Falcon Sensor Billing Tool • Data sourced from NG SIEM Event Search & Hosts API</p>
+    </footer>
+
+    <script src="{{ url_for('static', filename='app.js') }}?v=4"></script>
+</body>
+</html>

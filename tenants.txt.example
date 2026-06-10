@@ -1,0 +1,9 @@
+# Tenant CID List
+# Format: CID or CID,TenantName
+# Lines starting with # are comments
+
+# Example entries:
+abc123def456789,Acme Corporation
+ghi789jkl012345,Wayne Enterprises
+mno345pqr678901,Stark Industries
+stu901vwx234567,Umbrella Corp
