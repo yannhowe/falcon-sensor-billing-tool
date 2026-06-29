@@ -118,10 +118,13 @@ def create_app(db_path: str = None) -> Flask:
             )
 
             for row in cid_cursor.fetchall():
-                avg = row["total"] / collected_hours if collected_hours else 0
-                fcs_avg = row["fcs_total"] / collected_hours if collected_hours else 0
-                fcsc_avg = row["fcsc_total"] / collected_hours if collected_hours else 0
-                fmc_avg = row["fmc_total"] / collected_hours if collected_hours else 0
+                # Use per-CID hours for averaging (not global hours which
+                # would dilute the average if this CID has fewer hours collected)
+                cid_hours = row["hours_collected"] or collected_hours
+                avg = row["total"] / cid_hours if cid_hours else 0
+                fcs_avg = row["fcs_total"] / cid_hours if cid_hours else 0
+                fcsc_avg = row["fcsc_total"] / cid_hours if cid_hours else 0
+                fmc_avg = row["fmc_total"] / cid_hours if cid_hours else 0
 
                 # EPP weekly avg: average of daily peak EPP counts over 7 days
                 epp_daily = conn.execute(
