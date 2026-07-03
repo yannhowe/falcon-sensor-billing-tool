@@ -4,7 +4,7 @@ Usage:
     falcon-billing collect [--hourly] [--days N] [--cid CID] [--prune] [--retain-days N]
     falcon-billing query [--hourly | --weekly] [--cid CID] [--output FILE]
     falcon-billing multi-tenant [--auto-discover | --cids CID1,CID2 | --cid-file FILE]
-    falcon-billing tag-report [--days N] [--output FILE] [--cid CID]
+    falcon-billing tag-report [--days N] [--output FILE] [--cid CID] [--format pivot|consolidated]
     falcon-billing verify --start-date DATE --end-date DATE [--cid CID]
     falcon-billing prune [--retain-days N] [--dry-run]
     falcon-billing dashboard [--port PORT] [--host HOST] [--no-auth]
@@ -75,6 +75,8 @@ def main():
                        help="Rolling average window in days (default: 28)")
     p_tag.add_argument("--output", type=Path, help="CSV output path (default: stdout)")
     p_tag.add_argument("--cid", default="default", help="Filter to specific CID")
+    p_tag.add_argument("--format", choices=["pivot", "consolidated"], default="pivot",
+                       help="Output format: pivot (one row per tag) or consolidated (one row per tag+license_type)")
 
     # --- verify ---
     p_verify = subparsers.add_parser("verify", help="Compare calculated vs API billing")
@@ -271,95 +273,103 @@ def cmd_multi_tenant(args):
 
 
 def cmd_tag_report(args):
-    from falcon_billing.credentials import load_credentials
     from falcon_billing.database import BillingDatabase
-    from falcon_billing.ngsiem import query_ngsiem_for_sensors, NgsiemQueryFailed
-    from falcon_billing.collector import enrich_sensors_with_host_details, get_falcon_client, query_hosts_api_for_active_sensors
 
     db = BillingDatabase(args.db)
-    creds = load_credentials()
-    falcon_client = get_falcon_client()
-    cid = args.cid
 
-    total_hours = args.days * 24
+    # Use pre-aggregated hourly_tag_counts instead of re-querying NGSIEM
+    target_hours = args.days * 24
     now = datetime.now(timezone.utc)
-    all_sensor_ids = set()
+    cutoff = (now - timedelta(hours=target_hours)).strftime("%Y-%m-%d %H:%M:%S")
 
-    print(f"Querying {total_hours} hours of NGSIEM data ({args.days} days)...", file=sys.stderr)
-    for i in range(total_hours):
-        hour_start = (now - timedelta(hours=total_hours - i)).replace(minute=0, second=0, microsecond=0)
-        hour_end = hour_start + timedelta(hours=1)
-        hour_start_iso = hour_start.strftime("%Y-%m-%dT%H:%M:%SZ")
-        hour_end_iso = hour_end.strftime("%Y-%m-%dT%H:%M:%SZ")
+    conn = db.get_connection()
 
-        try:
-            sensor_ids = query_ngsiem_for_sensors(
-                hour_start_iso, hour_end_iso, cid,
-                client_id=creds["client_id"],
-                client_secret=creds["client_secret"],
-                cloud_region=creds["cloud_region"],
-            )
-        except NgsiemQueryFailed:
-            logger.warning("NGSIEM failed for %s, trying Hosts API", hour_start_iso)
-            sensor_ids = query_hosts_api_for_active_sensors(falcon_client, hour_start_iso, hour_end_iso, cid)
+    # Get collected hours for averaging
+    hours_row = conn.execute(
+        "SELECT COUNT(DISTINCT hour_timestamp) as total_hours "
+        "FROM hourly_counts WHERE hour_timestamp >= ?",
+        (cutoff,),
+    ).fetchone()
+    collected_hours = hours_row["total_hours"] or 1
 
-        all_sensor_ids.update(sensor_ids)
+    # Query per-tag per-SKU aggregates
+    cid_filter = args.cid
+    if cid_filter and cid_filter != "default":
+        cursor = conn.execute(
+            "SELECT tag, "
+            "SUM(unique_sensor_count) as total, "
+            "SUM(COALESCE(fcs_count, 0)) as fcs_total, "
+            "SUM(COALESCE(fcsc_count, 0)) as fcsc_total, "
+            "SUM(COALESCE(fmc_count, 0)) as fmc_total, "
+            "SUM(COALESCE(epp_count, 0)) as epp_total "
+            "FROM hourly_tag_counts "
+            "WHERE hour_timestamp >= ? AND cid = ? "
+            "GROUP BY tag ORDER BY total DESC",
+            (cutoff, cid_filter),
+        )
+    else:
+        cursor = conn.execute(
+            "SELECT tag, "
+            "SUM(unique_sensor_count) as total, "
+            "SUM(COALESCE(fcs_count, 0)) as fcs_total, "
+            "SUM(COALESCE(fcsc_count, 0)) as fcsc_total, "
+            "SUM(COALESCE(fmc_count, 0)) as fmc_total, "
+            "SUM(COALESCE(epp_count, 0)) as epp_total "
+            "FROM hourly_tag_counts "
+            "WHERE hour_timestamp >= ? "
+            "GROUP BY tag ORDER BY total DESC",
+            (cutoff,),
+        )
 
-        if (i + 1) % 24 == 0:
-            print(f"  Day {(i + 1) // 24}/{args.days}: {len(all_sensor_ids)} unique sensors so far", file=sys.stderr)
-
-    print(f"Total unique sensors: {len(all_sensor_ids)}", file=sys.stderr)
-    print("Enriching with host metadata...", file=sys.stderr)
-    enriched = enrich_sensors_with_host_details(falcon_client, db, list(all_sensor_ids))
-
-    # Group by SensorGroupingTag
-    tag_counts = {}
-    untagged = set()
-
-    for sensor_id, metadata in enriched.items():
-        tags_json = metadata.get("tags", "[]")
-        try:
-            tags = json.loads(tags_json) if isinstance(tags_json, str) else (tags_json or [])
-        except (json.JSONDecodeError, TypeError):
-            tags = []
-
-        sensor_tags = [t for t in tags if t.startswith("SensorGroupingTag/")]
-
-        if not sensor_tags:
-            untagged.add(sensor_id)
-        else:
-            for tag in sensor_tags:
-                if tag not in tag_counts:
-                    tag_counts[tag] = set()
-                tag_counts[tag].add(sensor_id)
-
-    # Build CSV rows
     rows = []
-    total = len(all_sensor_ids)
+    for row in cursor.fetchall():
+        rows.append({
+            "tag": row["tag"],
+            "fcs_28day_avg": f"{row['fcs_total'] / collected_hours:.1f}",
+            "fcsc_28day_avg": f"{row['fcsc_total'] / collected_hours:.1f}",
+            "fmc_28day_avg": f"{row['fmc_total'] / collected_hours:.1f}",
+            "epp_28day_avg": f"{row['epp_total'] / collected_hours:.1f}",
+            "total_28day_avg": f"{row['total'] / collected_hours:.1f}",
+        })
 
-    for tag, sensors in sorted(tag_counts.items(), key=lambda x: len(x[1]), reverse=True):
-        count = len(sensors)
-        pct = (count / total * 100) if total > 0 else 0
-        rows.append({"tag": tag, "unique_hosts": count, "28day_avg_licenses": count, "percentage": f"{pct:.1f}%"})
+    if not rows:
+        print("No tag data found. Run 'falcon-billing collect' first.", file=sys.stderr)
+        sys.exit(1)
 
-    if untagged:
-        pct = (len(untagged) / total * 100) if total > 0 else 0
-        rows.append({"tag": "(untagged)", "unique_hosts": len(untagged), "28day_avg_licenses": len(untagged), "percentage": f"{pct:.1f}%"})
+    if args.format == "consolidated":
+        # Flat format: one row per tag + license_type combination
+        consolidated_rows = []
+        for row in rows:
+            for sku, col in [("FCS", "fcs_28day_avg"), ("FCSC", "fcsc_28day_avg"),
+                             ("FMC", "fmc_28day_avg"), ("EPP", "epp_28day_avg")]:
+                value = float(row[col])
+                if value > 0:
+                    consolidated_rows.append({
+                        "sensor_tag": row["tag"],
+                        "license_type": sku,
+                        "allot_unit": row[col],
+                    })
 
-    fieldnames = ["tag", "unique_hosts", "28day_avg_licenses", "percentage"]
+        fieldnames = ["sensor_tag", "license_type", "allot_unit"]
+        output_rows = consolidated_rows
+    else:
+        # Default pivot format: one row per tag with SKU columns
+        fieldnames = ["tag", "fcs_28day_avg", "fcsc_28day_avg", "fmc_28day_avg", "epp_28day_avg", "total_28day_avg"]
+        output_rows = rows
 
     if args.output:
         with open(args.output, "w", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
-            writer.writerows(rows)
+            writer.writerows(output_rows)
         print(f"Tag report written to {args.output}", file=sys.stderr)
     else:
         writer = csv.DictWriter(sys.stdout, fieldnames=fieldnames)
         writer.writeheader()
-        writer.writerows(rows)
+        writer.writerows(output_rows)
 
-    db.log_audit("tag_report", f"days={args.days}, tags={len(tag_counts)}, total={total}", "cli")
+    print(f"\n{len(rows)} tags, {collected_hours} hours collected (target: {target_hours})", file=sys.stderr)
+    db.log_audit("tag_report", f"days={args.days}, tags={len(rows)}, hours={collected_hours}", "cli")
 
 
 def cmd_verify(args):
