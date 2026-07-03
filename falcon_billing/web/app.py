@@ -160,6 +160,10 @@ def create_app(db_path: str = None) -> Flask:
             tag_cursor = conn.execute(
                 "SELECT tag, "
                 "SUM(unique_sensor_count) as total, "
+                "SUM(COALESCE(fcs_count, 0)) as fcs_total, "
+                "SUM(COALESCE(fcsc_count, 0)) as fcsc_total, "
+                "SUM(COALESCE(fmc_count, 0)) as fmc_total, "
+                "SUM(COALESCE(epp_count, 0)) as epp_total, "
                 "MAX(unique_sensor_count) as max_sensors, "
                 "COUNT(*) as hours_active "
                 "FROM hourly_tag_counts "
@@ -171,12 +175,19 @@ def create_app(db_path: str = None) -> Flask:
             tags = []
             for row in tag_cursor.fetchall():
                 avg = row["total"] / collected_hours if collected_hours else 0
+                fcs_avg = row["fcs_total"] / collected_hours if collected_hours else 0
+                fcsc_avg = row["fcsc_total"] / collected_hours if collected_hours else 0
+                fmc_avg = row["fmc_total"] / collected_hours if collected_hours else 0
+                epp_avg = row["epp_total"] / collected_hours if collected_hours else 0
                 tags.append({
                     "tag": row["tag"],
-                    "avg_sensors": round(avg, 2),
+                    "avg_sensors": round(avg, 1),
+                    "fcs_avg": round(fcs_avg, 1),
+                    "fcsc_avg": round(fcsc_avg, 1),
+                    "fmc_avg": round(fmc_avg, 1),
+                    "epp_avg": round(epp_avg, 1),
                     "max_sensors": row["max_sensors"],
                     "hours_active": row["hours_active"],
-                    "allocation_units": math.ceil(avg),
                 })
 
             return jsonify({
@@ -396,9 +407,13 @@ def create_app(db_path: str = None) -> Flask:
             conn.close()
 
         def generate_tag():
-            yield "tag,28day_avg,max_hourly,hours_active,allocation_units\n"
+            yield "tag,total_28day_avg,fcs_avg,fcsc_avg,fmc_avg,epp_avg,max_hourly,hours_active\n"
             cursor = conn.execute(
                 "SELECT tag, SUM(unique_sensor_count) as total, "
+                "SUM(COALESCE(fcs_count, 0)) as fcs_total, "
+                "SUM(COALESCE(fcsc_count, 0)) as fcsc_total, "
+                "SUM(COALESCE(fmc_count, 0)) as fmc_total, "
+                "SUM(COALESCE(epp_count, 0)) as epp_total, "
                 "MAX(unique_sensor_count) as max_s, "
                 "COUNT(*) as hours "
                 "FROM hourly_tag_counts WHERE hour_timestamp >= ? "
@@ -407,10 +422,42 @@ def create_app(db_path: str = None) -> Flask:
             )
             for row in cursor:
                 avg = row["total"] / collected_hours
-                yield f"{_csv_safe(row['tag'])},{avg:.2f},{row['max_s']},{row['hours']},{math.ceil(avg)}\n"
+                fcs_a = row["fcs_total"] / collected_hours
+                fcsc_a = row["fcsc_total"] / collected_hours
+                fmc_a = row["fmc_total"] / collected_hours
+                epp_a = row["epp_total"] / collected_hours
+                yield (
+                    f"{_csv_safe(row['tag'])},{avg:.1f},{fcs_a:.1f},{fcsc_a:.1f},"
+                    f"{fmc_a:.1f},{epp_a:.1f},{row['max_s']},{row['hours']}\n"
+                )
             conn.close()
 
-        gen_func = generate_cid if export_type == "cid" else generate_tag
+        def generate_consolidated():
+            yield "sensor_tag,license_type,allot_unit\n"
+            cursor = conn.execute(
+                "SELECT tag, SUM(unique_sensor_count) as total, "
+                "SUM(COALESCE(fcs_count, 0)) as fcs_total, "
+                "SUM(COALESCE(fcsc_count, 0)) as fcsc_total, "
+                "SUM(COALESCE(fmc_count, 0)) as fmc_total, "
+                "SUM(COALESCE(epp_count, 0)) as epp_total "
+                "FROM hourly_tag_counts WHERE hour_timestamp >= ? "
+                "GROUP BY tag ORDER BY total DESC",
+                (cutoff,),
+            )
+            for row in cursor:
+                for sku, col in [("FCS", "fcs_total"), ("FCSC", "fcsc_total"),
+                                 ("FMC", "fmc_total"), ("EPP", "epp_total")]:
+                    avg = row[col] / collected_hours
+                    if avg >= 0.05:
+                        yield f"{_csv_safe(row['tag'])},{sku},{avg:.1f}\n"
+            conn.close()
+
+        generators = {
+            "cid": generate_cid,
+            "tag": generate_tag,
+            "consolidated": generate_consolidated,
+        }
+        gen_func = generators.get(export_type, generate_tag)
         filename = f"fcs_licensing_{export_type}_{datetime.utcnow().strftime('%Y%m%d')}.csv"
 
         return Response(
