@@ -198,6 +198,31 @@ Per-hour breakdown (672 hours):
   ...
 ```
 
+### `tag-report`
+
+```bash
+falcon-billing tag-report                          # pivot format (default)
+falcon-billing tag-report --format consolidated    # one row per tag + license type
+falcon-billing tag-report --days 7                 # last 7 days only
+falcon-billing tag-report --output /tmp/tags.csv   # write to file
+```
+
+Generates per-tag license allocation from the local database. Two output formats:
+
+- **`pivot`** (default) — one row per tag, columns for each SKU
+- **`consolidated`** — one row per tag + license_type pair (flat format for chargeback systems)
+
+**Consolidated sample:**
+
+```csv
+sensor_tag,license_type,allot_unit
+SensorGroupingTag/prod,FCS,45.2
+SensorGroupingTag/prod,FCSC,8.1
+SensorGroupingTag/prod,FMC,5.7
+SensorGroupingTag/staging,FCS,32.0
+SensorGroupingTag/staging,EPP,12.0
+```
+
 ### `prune`
 
 ```bash
@@ -231,6 +256,9 @@ curl -s -H "X-API-Key: your-secret-key" http://127.0.0.1:8080/api/fcs/summary
 
 # Query param (for downloads)
 curl -s "http://127.0.0.1:8080/api/fcs/export?type=tag&api_key=your-secret-key" -o tags.csv
+
+# Consolidated format (flat: one row per tag + license type)
+curl -s "http://127.0.0.1:8080/api/fcs/export?type=consolidated&api_key=your-secret-key" -o consolidated.csv
 ```
 
 When `DASHBOARD_API_KEY` is not set, auth is disabled (all endpoints open).
@@ -257,11 +285,29 @@ hour_timestamp,unique_sensor_count,fcs_count,fcsc_count,fmc_count,epp_count
 ### Tag report (`tag-report`)
 
 ```csv
-tag,unique_hosts,28day_avg_licenses,percentage
-SensorGroupingTag/prod,59,59,23.9%
-SensorGroupingTag/staging,44,44,17.8%
-(untagged),22,22,8.9%
+tag,fcs_28day_avg,fcsc_28day_avg,fmc_28day_avg,epp_28day_avg,total_28day_avg
+SensorGroupingTag/prod,45.2,8.1,5.7,0.0,59.0
+SensorGroupingTag/staging,32.0,0.0,0.0,12.0,44.0
+(untagged),15.0,2.3,0.0,4.8,22.1
 ```
+
+### Consolidated format (`tag-report --format consolidated`)
+
+Flat format suitable for import into chargeback/billing systems:
+
+```csv
+sensor_tag,license_type,allot_unit
+SensorGroupingTag/prod,FCS,45.2
+SensorGroupingTag/prod,FCSC,8.1
+SensorGroupingTag/prod,FMC,5.7
+SensorGroupingTag/staging,FCS,32.0
+SensorGroupingTag/staging,EPP,12.0
+(untagged),FCS,15.0
+(untagged),FCSC,2.3
+(untagged),EPP,4.8
+```
+
+Also available from the dashboard: `GET /api/fcs/export?type=consolidated`
 
 ---
 
