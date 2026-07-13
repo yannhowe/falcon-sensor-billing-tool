@@ -26,11 +26,11 @@ _BULK_SENSOR_QUERY = """
 | groupBy([hour_key, aid], function=count())
 """
 
-# FCS query: SensorHeartbeat AIDs that are NOT pods AND NOT container runtime hosts
-# Uses !join anti-join to exclude AIDs that emitted any OCI container event (FCSC hosts)
+# FCS query: SensorHeartbeat AIDs that did NOT emit any OCI container events (FCSC hosts).
+# ProductType is not a field in SensorHeartbeat or Oci* events — FMC pod sensors are
+# identified after enrichment using product_type_desc from the Hosts API instead.
 _FCS_QUERY = """
 #event_simpleName=SensorHeartbeat
-| ProductType!=Pod
 | groupBy([aid])
 | !join(query={
     #event_simpleName=Oci*
@@ -39,12 +39,13 @@ _FCS_QUERY = """
 | select([aid])
 """
 
-# FCSC query: AIDs that emitted any OCI container event, excluding pods (container runtime hosts)
+# FCSC query: AIDs that emitted any OCI container event (container runtime hosts).
 # Uses wildcard Oci* to catch all container-related events (OciContainerStarted,
-# OciContainerTelemetry, OciContainerStopped, OciContainerExec, etc.)
+# OciContainerTelemetry, OciContainerStopped, OciContainerExec, etc.).
+# Note: ProductType is not a field in Oci* events. FMC pod sensors that also emit
+# OCI events are reclassified post-enrichment using product_type_desc from the Hosts API.
 _CONTAINER_HOST_QUERY = """
 #event_simpleName=Oci*
-| ProductType!=Pod
 | groupBy(aid, function=count())
 | select([aid])
 """
@@ -54,15 +55,6 @@ _CONTAINER_HOST_QUERY = """
 # start/stop containers in the specific billing hour but are still container hosts.
 _CONTAINER_HOST_24H_QUERY = """
 #event_simpleName=Oci*
-| ProductType!=Pod
-| groupBy(aid, function=count())
-| select([aid])
-"""
-
-# FMC query: pod sensors identified by ProductType=Pod in SensorHeartbeat
-_FMC_QUERY = """
-#event_simpleName=SensorHeartbeat
-| ProductType=Pod
 | groupBy(aid, function=count())
 | select([aid])
 """
@@ -358,11 +350,11 @@ def query_ngsiem_for_fcs(
     max_retries: int = 3,
     timeout_sequence: tuple[int, ...] = (30, 60, 120),
 ) -> list[str]:
-    """Query NGSIEM for FCS AIDs (SensorHeartbeat, ProductType!=Pod, no OCI events).
+    """Query NGSIEM for FCS AIDs (SensorHeartbeat with no OCI events).
 
-    Uses !join anti-join to exclude any AID that also appears in OCI container events,
-    ensuring no overlap with FCSC. Combined with FMC and FCSC counts, should tally
-    exactly with the total SensorHeartbeat count.
+    Uses !join anti-join to exclude any AID that also appears in OCI container events
+    (FCSC hosts). FMC pod sensors are reclassified post-enrichment using product_type_desc
+    from the Hosts API, not via a NGSIEM query.
     """
     return query_ngsiem_for_sensors(
         hour_start,
@@ -390,7 +382,7 @@ def query_ngsiem_for_container_hosts(
     max_retries: int = 3,
     timeout_sequence: tuple[int, ...] = (30, 60, 120),
 ) -> list[str]:
-    """Query NGSIEM for FCSC container host AIDs (OCI events, ProductType!=Pod)."""
+    """Query NGSIEM for FCSC container host AIDs (AIDs that emitted Oci* events)."""
     return query_ngsiem_for_sensors(
         hour_start,
         hour_end,
@@ -441,33 +433,6 @@ def query_ngsiem_for_container_hosts_24h(
         max_retries=max_retries,
         timeout_sequence=timeout_sequence,
         query_string=_CONTAINER_HOST_24H_QUERY,
-    )
-
-
-def query_ngsiem_for_fmc(
-    hour_start: str,
-    hour_end: str,
-    cid: str,
-    *,
-    client_id: str,
-    client_secret: str,
-    cloud_region: str = "us-1",
-    view_name: str = "search-all",
-    max_retries: int = 3,
-    timeout_sequence: tuple[int, ...] = (30, 60, 120),
-) -> list[str]:
-    """Query NGSIEM for FMC pod sensor AIDs (SensorHeartbeat, ProductType=Pod)."""
-    return query_ngsiem_for_sensors(
-        hour_start,
-        hour_end,
-        cid,
-        client_id=client_id,
-        client_secret=client_secret,
-        cloud_region=cloud_region,
-        view_name=view_name,
-        max_retries=max_retries,
-        timeout_sequence=timeout_sequence,
-        query_string=_FMC_QUERY,
     )
 
 

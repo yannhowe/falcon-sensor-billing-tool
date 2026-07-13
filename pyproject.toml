@@ -1,6 +1,6 @@
 [project]
 name = "falcon-billing"
-version = "1.1.0"
+version = "2.4.0"
 description = "CrowdStrike Falcon sensor billing, cost allocation, and chargeback tool"
 requires-python = ">=3.10"
 dependencies = [
