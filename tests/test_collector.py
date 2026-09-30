@@ -1,5 +1,6 @@
 """Tests for falcon_billing.collector (integration with mocked APIs)."""
 
+import csv
 import json
 import sys
 from datetime import datetime, timedelta, timezone
@@ -287,3 +288,61 @@ class TestReCollectReplacesHour:
         assert _logged_sensor_ids(db, HOUR) == ["a", "b"]
         assert row["unique_sensor_count"] == 2
         assert len(_logged_sensor_ids(db, HOUR)) == row["unique_sensor_count"]
+
+
+def _seed_reconcile_hours(db, cid, total, fcsc, fmc, fcs, epp, n_hours=24):
+    """Store n_hours identical recent hours. With a 1-day window (period_hours=24),
+    24 equal hours make each SKU's rolling average equal its per-hour count, so the
+    reconciliation gap against a billed row is trivial to reason about."""
+    now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+    for i in range(n_hours):
+        hour = (now - timedelta(hours=i)).strftime("%Y-%m-%d %H:%M:%S")
+        db.store_hour(hour, cid, [], total, fcsc, fmc, fcs, epp)
+
+
+class TestGenerateReconciliation:
+    def test_per_sku_gap_and_direction_against_billed(self, tmp_path, db):
+        from falcon_billing.collector import generate_reconciliation
+
+        # Tool estimate: FCS=2, FCSC=1, FMC=0, EPP=0 (24 equal hours, 1-day window).
+        _seed_reconcile_hours(db, "cid1", total=3, fcsc=1, fmc=0, fcs=2, epp=0)
+        # Billed: FCS=3, FCSC=1, FMC=0, EPP=servers 2 + workstations 1 = 3.
+        db.insert_billing_average(
+            "2026-09-28",
+            {"cloud_vms": 3, "container_hosts": 1, "managed_containers": 0,
+             "servers": 2, "workstations": 1},
+            "cid1",
+        )
+
+        out = tmp_path / "recon.csv"
+        result = generate_reconciliation(db, cid="cid1", days=1, output_path=str(out))
+
+        assert result == str(out)
+        with open(out) as f:
+            rows = {r["sku"]: r for r in csv.DictReader(f)}
+
+        assert rows["FCS"]["tool_estimate"] == "2.00"
+        assert rows["FCS"]["billed"] == "3.00"
+        assert rows["FCS"]["gap"] == "-1.00"
+        assert rows["FCS"]["direction"] == "under"
+
+        assert rows["FCSC"]["gap"] == "+0.00"
+        assert rows["FCSC"]["direction"] == "match"
+
+        # EPP is billed 3 (servers+workstations) but the tool collected none.
+        assert rows["EPP"]["billed"] == "3.00"
+        assert rows["EPP"]["tool_estimate"] == "0.00"
+        assert rows["EPP"]["direction"] == "under"
+
+    def test_hints_when_no_billed_row_stored(self, tmp_path, capsys, db):
+        from falcon_billing.collector import generate_reconciliation
+
+        _seed_reconcile_hours(db, "cid1", total=1, fcsc=1, fmc=0, fcs=0, epp=0)
+
+        result = generate_reconciliation(db, cid="cid1", days=1,
+                                         output_path=str(tmp_path / "recon.csv"))
+
+        assert result is None
+        assert not (tmp_path / "recon.csv").exists()
+        err = capsys.readouterr().err
+        assert "fetch-billing" in err

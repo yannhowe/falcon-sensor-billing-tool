@@ -6,7 +6,7 @@ Usage:
     falcon-billing fetch-billing --cid CID
     falcon-billing multi-tenant [--auto-discover | --cids CID1,CID2 | --cid-file FILE]
     falcon-billing tag-report [--days N] [--output FILE] [--cid CID] [--format pivot|consolidated]
-    falcon-billing verify --start-date DATE --end-date DATE [--cid CID]
+    falcon-billing verify [--cid CID] [--days N] [--output FILE]
     falcon-billing prune [--retain-days N] [--dry-run]
     falcon-billing dashboard [--port PORT] [--host HOST] [--no-auth]
 """
@@ -92,10 +92,12 @@ def main():
                        help="Output format: pivot (one row per tag) or consolidated (one row per tag+license_type)")
 
     # --- verify ---
-    p_verify = subparsers.add_parser("verify", help="Compare calculated vs API billing")
-    p_verify.add_argument("--start-date", required=True, help="Start date (YYYY-MM-DD)")
-    p_verify.add_argument("--end-date", required=True, help="End date (YYYY-MM-DD)")
+    p_verify = subparsers.add_parser(
+        "verify", help="Reconcile tool estimate against the billed total per SKU")
     p_verify.add_argument("--cid", default="default", help="Target CID")
+    p_verify.add_argument("--days", type=int, default=28,
+                          help="Rolling window in days for the tool estimate (default: 28)")
+    p_verify.add_argument("--output", type=Path, help="Write reconciliation CSV")
 
     # --- prune ---
     p_prune = subparsers.add_parser("prune", help="Remove old data from database")
@@ -395,11 +397,11 @@ def cmd_tag_report(args):
 
 def cmd_verify(args):
     from falcon_billing.database import BillingDatabase
-    from falcon_billing.collector import generate_verification_report
+    from falcon_billing.collector import generate_reconciliation
 
     db = BillingDatabase(args.db)
-    generate_verification_report(db, args.start_date, args.end_date, args.cid)
-    db.log_audit("verify", f"start={args.start_date}, end={args.end_date}", "cli")
+    generate_reconciliation(db, cid=args.cid, days=args.days, output_path=args.output)
+    db.log_audit("verify", f"cid={args.cid}, days={args.days}", "cli")
 
 
 def cmd_prune(args):
