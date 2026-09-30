@@ -1,0 +1,851 @@
+{
+  "profile": "talon_1",
+  "event_date": "2026-09-28",
+  "lookback_hours": 25,
+  "official": {
+    "2026-09-28": {
+      "containers": 72.875,
+      "public_cloud_with_containers": 72.86607142857143,
+      "servers_with_containers": 0.008928571428571428,
+      "public_cloud_without_containers": 214.58333333333331,
+      "servers_without_containers": 7.9761904761904745,
+      "workstations": 16.092261904761905,
+      "mobile": 0.8526785714285714,
+      "lumos": 8.811011904761905
+    },
+    "2026-09-27": {
+      "containers": 72.3422619047619,
+      "public_cloud_with_containers": 72.33333333333333,
+      "servers_with_containers": 0.008928571428571428,
+      "public_cloud_without_containers": 213.8303571428571,
+      "servers_without_containers": 8.032738095238093,
+      "workstations": 16.095238095238095,
+      "mobile": 0.8705357142857142,
+      "lumos": 8.738095238095239
+    },
+    "2026-09-26": {
+      "containers": 71.86904761904762,
+      "public_cloud_with_containers": 71.86011904761905,
+      "servers_with_containers": 0.008928571428571428,
+      "public_cloud_without_containers": 213.1235119047619,
+      "servers_without_containers": 8.093749999999998,
+      "workstations": 16.135416666666664,
+      "mobile": 0.8749999999999999,
+      "lumos": 8.666666666666668
+    },
+    "2026-09-25": {
+      "containers": 71.4985119047619,
+      "public_cloud_with_containers": 71.48660714285714,
+      "servers_with_containers": 0.011904761904761904,
+      "public_cloud_without_containers": 211.9925595238095,
+      "servers_without_containers": 8.174107142857142,
+      "workstations": 16.156249999999996,
+      "mobile": 0.900297619047619,
+      "lumos": 8.604166666666668
+    },
+    "2026-09-24": {
+      "containers": 71.12053571428571,
+      "public_cloud_with_containers": 71.10565476190476,
+      "servers_with_containers": 0.01488095238095238,
+      "public_cloud_without_containers": 210.73363095238093,
+      "servers_without_containers": 8.230654761904761,
+      "workstations": 16.153273809523807,
+      "mobile": 0.9375,
+      "lumos": 8.532738095238097
+    },
+    "2026-09-23": {
+      "containers": 70.94642857142857,
+      "public_cloud_with_containers": 70.92857142857143,
+      "servers_with_containers": 0.017857142857142856,
+      "public_cloud_without_containers": 209.60267857142858,
+      "servers_without_containers": 8.291666666666666,
+      "workstations": 16.075892857142854,
+      "mobile": 0.9613095238095236,
+      "lumos": 8.452380952380953
+    },
+    "2026-09-22": {
+      "containers": 70.78422619047619,
+      "public_cloud_with_containers": 70.75446428571429,
+      "servers_with_containers": 0.029761904761904764,
+      "public_cloud_without_containers": 208.50595238095235,
+      "servers_without_containers": 8.40327380952381,
+      "workstations": 15.873511904761903,
+      "mobile": 0.9970238095238093,
+      "lumos": 8.258928571428573
+    },
+    "2026-09-21": {
+      "containers": 70.41369047619048,
+      "public_cloud_with_containers": 70.38095238095238,
+      "servers_with_containers": 0.03273809523809524,
+      "public_cloud_without_containers": 207.22321428571425,
+      "servers_without_containers": 8.458333333333334,
+      "workstations": 15.837797619047619,
+      "mobile": 1.0282738095238093,
+      "lumos": 8.148809523809524
+    },
+    "2026-09-20": {
+      "containers": 69.86904761904763,
+      "public_cloud_with_containers": 69.83630952380953,
+      "servers_with_containers": 0.03273809523809524,
+      "public_cloud_without_containers": 206.2202380952381,
+      "servers_without_containers": 8.52827380952381,
+      "workstations": 15.854166666666666,
+      "mobile": 1.101190476190476,
+      "lumos": 8.041666666666666
+    },
+    "2026-09-19": {
+      "containers": 69.38839285714288,
+      "public_cloud_with_containers": 69.35565476190477,
+      "servers_with_containers": 0.03273809523809524,
+      "public_cloud_without_containers": 205.1056547619048,
+      "servers_without_containers": 8.586309523809524,
+      "workstations": 15.867559523809522,
+      "mobile": 1.1547619047619049,
+      "lumos": 7.934523809523809
+    },
+    "2026-09-18": {
+      "containers": 69.0342261904762,
+      "public_cloud_with_containers": 68.99851190476191,
+      "servers_with_containers": 0.03571428571428572,
+      "public_cloud_without_containers": 203.9181547619048,
+      "servers_without_containers": 8.662202380952383,
+      "workstations": 15.83333333333333,
+      "mobile": 1.2574404761904763,
+      "lumos": 7.827380952380952
+    },
+    "2026-09-17": {
+      "containers": 68.48065476190477,
+      "public_cloud_with_containers": 68.44494047619048,
+      "servers_with_containers": 0.03571428571428572,
+      "public_cloud_without_containers": 202.94791666666666,
+      "servers_without_containers": 8.724702380952383,
+      "workstations": 15.720238095238093,
+      "mobile": 1.3571428571428574,
+      "lumos": 7.617559523809524
+    },
+    "2026-09-16": {
+      "containers": 67.99404761904762,
+      "public_cloud_with_containers": 67.94791666666667,
+      "servers_with_containers": 0.04613095238095238,
+      "public_cloud_without_containers": 201.77232142857147,
+      "servers_without_containers": 8.697916666666668,
+      "workstations": 13.947916666666668,
+      "mobile": 1.441964285714286,
+      "lumos": 7.382440476190475
+    },
+    "2026-09-15": {
+      "containers": 67.47619047619048,
+      "public_cloud_with_containers": 67.43005952380953,
+      "servers_with_containers": 0.04613095238095238,
+      "public_cloud_without_containers": 200.91220238095244,
+      "servers_without_containers": 8.67261904761905,
+      "workstations": 13.824404761904763,
+      "mobile": 1.480654761904762,
+      "lumos": 7.278273809523809
+    },
+    "2026-09-14": {
+      "containers": 67.01785714285715,
+      "public_cloud_with_containers": 66.96875000000001,
+      "servers_with_containers": 0.04910714285714285,
+      "public_cloud_without_containers": 200.09672619047623,
+      "servers_without_containers": 8.671130952380954,
+      "workstations": 13.790178571428573,
+      "mobile": 1.5223214285714288,
+      "lumos": 7.172619047619047
+    },
+    "2026-09-13": {
+      "containers": 66.64583333333334,
+      "public_cloud_with_containers": 66.5952380952381,
+      "servers_with_containers": 0.05059523809523808,
+      "public_cloud_without_containers": 199.08482142857147,
+      "servers_without_containers": 8.665178571428573,
+      "workstations": 13.775297619047619,
+      "mobile": 1.5342261904761902,
+      "lumos": 7.035714285714286
+    },
+    "2026-09-12": {
+      "containers": 66.22172619047619,
+      "public_cloud_with_containers": 66.17113095238095,
+      "servers_with_containers": 0.05059523809523808,
+      "public_cloud_without_containers": 197.90178571428578,
+      "servers_without_containers": 8.639880952380954,
+      "workstations": 13.766369047619047,
+      "mobile": 1.5595238095238095,
+      "lumos": 6.897321428571429
+    },
+    "2026-09-11": {
+      "containers": 65.76041666666667,
+      "public_cloud_with_containers": 65.70684523809524,
+      "servers_with_containers": 0.053571428571428555,
+      "public_cloud_without_containers": 196.62351190476195,
+      "servers_without_containers": 8.569940476190478,
+      "workstations": 13.772321428571429,
+      "mobile": 1.5833333333333335,
+      "lumos": 6.75
+    },
+    "2026-09-10": {
+      "containers": 65.47470238095238,
+      "public_cloud_with_containers": 65.42113095238095,
+      "servers_with_containers": 0.053571428571428555,
+      "public_cloud_without_containers": 195.3601190476191,
+      "servers_without_containers": 8.51636904761905,
+      "workstations": 13.824404761904763,
+      "mobile": 1.6264880952380951,
+      "lumos": 6.602678571428572
+    },
+    "2026-09-09": {
+      "containers": 65.19494047619048,
+      "public_cloud_with_containers": 65.13839285714286,
+      "servers_with_containers": 0.05654761904761903,
+      "public_cloud_without_containers": 195.49851190476195,
+      "servers_without_containers": 8.464285714285715,
+      "workstations": 13.831845238095237,
+      "mobile": 1.6919642857142858,
+      "lumos": 6.45982142857143
+    },
+    "2026-09-08": {
+      "containers": 64.91220238095238,
+      "public_cloud_with_containers": 64.85267857142857,
+      "servers_with_containers": 0.059523809523809514,
+      "public_cloud_without_containers": 197.18303571428575,
+      "servers_without_containers": 8.412202380952383,
+      "workstations": 13.808035714285714,
+      "mobile": 1.7187499999999998,
+      "lumos": 6.319940476190477
+    },
+    "2026-09-07": {
+      "containers": 64.48958333333333,
+      "public_cloud_with_containers": 64.43303571428571,
+      "servers_with_containers": 0.056547619047619034,
+      "public_cloud_without_containers": 198.04910714285717,
+      "servers_without_containers": 8.336309523809524,
+      "workstations": 13.75595238095238,
+      "mobile": 1.7351190476190474,
+      "lumos": 6.24107142857143
+    },
+    "2026-09-06": {
+      "containers": 64.29166666666667,
+      "public_cloud_with_containers": 64.21428571428572,
+      "servers_with_containers": 0.07738095238095237,
+      "public_cloud_without_containers": 198.5119047619048,
+      "servers_without_containers": 8.205357142857144,
+      "workstations": 13.79017857142857,
+      "mobile": 1.7485119047619047,
+      "lumos": 6.162202380952381
+    },
+    "2026-09-05": {
+      "containers": 64.14136904761905,
+      "public_cloud_with_containers": 64.0639880952381,
+      "servers_with_containers": 0.07738095238095237,
+      "public_cloud_without_containers": 197.66666666666669,
+      "servers_without_containers": 8.084821428571429,
+      "workstations": 13.84672619047619,
+      "mobile": 1.7366071428571423,
+      "lumos": 6.092261904761905
+    },
+    "2026-09-04": {
+      "containers": 64.05059523809524,
+      "public_cloud_with_containers": 63.97619047619048,
+      "servers_with_containers": 0.07440476190476189,
+      "public_cloud_without_containers": 197.05208333333331,
+      "servers_without_containers": 7.980654761904762,
+      "workstations": 13.91517857142857,
+      "mobile": 1.7559523809523807,
+      "lumos": 6.020833333333334
+    },
+    "2026-09-03": {
+      "containers": 64.14880952380952,
+      "public_cloud_with_containers": 64.07440476190476,
+      "servers_with_containers": 0.07440476190476189,
+      "public_cloud_without_containers": 196.8035714285714,
+      "servers_without_containers": 7.866071428571429,
+      "workstations": 13.962797619047619,
+      "mobile": 1.7425595238095235,
+      "lumos": 5.949404761904761
+    },
+    "2026-09-02": {
+      "containers": 64.29315476190474,
+      "public_cloud_with_containers": 64.21874999999999,
+      "servers_with_containers": 0.07440476190476189,
+      "public_cloud_without_containers": 196.4791666666666,
+      "servers_without_containers": 7.772321428571429,
+      "workstations": 14.047619047619046,
+      "mobile": 1.7172619047619044,
+      "lumos": 5.873511904761905
+    },
+    "2026-09-01": {
+      "containers": 64.37499999999999,
+      "public_cloud_with_containers": 64.30059523809523,
+      "servers_with_containers": 0.07440476190476189,
+      "public_cloud_without_containers": 196.37053571428564,
+      "servers_without_containers": 7.675595238095239,
+      "workstations": 14.13392857142857,
+      "mobile": 1.7395833333333333,
+      "lumos": 5.799107142857143
+    }
+  },
+  "average_test": {
+    "method": "28 sampled hours, one per day, vs the official 28-day average",
+    "replay_mean": {
+      "hosts_seen": 321.89285714285717,
+      "oci_any (current tool)": 131.53571428571428,
+      "info": 68.03571428571429,
+      "info_or_started": 79.07142857142857,
+      "info_or_started_or_containerheartbeat": 90.71428571428571,
+      "engineinfo": 73.03571428571429
+    },
+    "vs_official": {
+      "hosts_seen - official total": 0.70238095238102,
+      "oci_any (current tool) - official containers": 58.66071428571428,
+      "info - official containers": -4.839285714285708,
+      "info_or_started - official containers": 6.196428571428569,
+      "info_or_started_or_containerheartbeat - official containers": 17.839285714285708,
+      "engineinfo - official containers": 0.1607142857142918
+    },
+    "samples": [
+      {
+        "hour": "2026-09-01T21:00:00+00:00",
+        "hosts_seen": 302,
+        "oci_any (current tool)": 131,
+        "info": 56,
+        "info_or_started": 78,
+        "info_or_started_or_containerheartbeat": 89,
+        "engineinfo": 76,
+        "platforms": {
+          "K8s": 16,
+          "Lin": 133,
+          "Win": 153
+        }
+      },
+      {
+        "hour": "2026-09-02T14:00:00+00:00",
+        "hosts_seen": 290,
+        "oci_any (current tool)": 117,
+        "info": 59,
+        "info_or_started": 63,
+        "info_or_started_or_containerheartbeat": 74,
+        "engineinfo": 61,
+        "platforms": {
+          "Android": 1,
+          "K8s": 16,
+          "Lin": 119,
+          "Mac": 1,
+          "Win": 153
+        }
+      },
+      {
+        "hour": "2026-09-03T07:00:00+00:00",
+        "hosts_seen": 282,
+        "oci_any (current tool)": 116,
+        "info": 59,
+        "info_or_started": 64,
+        "info_or_started_or_containerheartbeat": 74,
+        "engineinfo": 61,
+        "platforms": {
+          "Android": 1,
+          "K8s": 16,
+          "Lin": 118,
+          "Win": 147
+        }
+      },
+      {
+        "hour": "2026-09-04T00:00:00+00:00",
+        "hosts_seen": 291,
+        "oci_any (current tool)": 118,
+        "info": 59,
+        "info_or_started": 66,
+        "info_or_started_or_containerheartbeat": 76,
+        "engineinfo": 63,
+        "platforms": {
+          "Android": 1,
+          "K8s": 16,
+          "Lin": 120,
+          "Win": 153,
+          "iOS": 1
+        }
+      },
+      {
+        "hour": "2026-09-05T17:00:00+00:00",
+        "hosts_seen": 323,
+        "oci_any (current tool)": 157,
+        "info": 64,
+        "info_or_started": 106,
+        "info_or_started_or_containerheartbeat": 116,
+        "engineinfo": 105,
+        "platforms": {
+          "Android": 1,
+          "K8s": 16,
+          "Lin": 160,
+          "Win": 146
+        }
+      },
+      {
+        "hour": "2026-09-06T10:00:00+00:00",
+        "hosts_seen": 307,
+        "oci_any (current tool)": 142,
+        "info": 64,
+        "info_or_started": 90,
+        "info_or_started_or_containerheartbeat": 100,
+        "engineinfo": 85,
+        "platforms": {
+          "Android": 1,
+          "K8s": 16,
+          "Lin": 144,
+          "Win": 146
+        }
+      },
+      {
+        "hour": "2026-09-07T03:00:00+00:00",
+        "hosts_seen": 326,
+        "oci_any (current tool)": 161,
+        "info": 64,
+        "info_or_started": 108,
+        "info_or_started_or_containerheartbeat": 119,
+        "engineinfo": 104,
+        "platforms": {
+          "Android": 1,
+          "K8s": 16,
+          "Lin": 164,
+          "Win": 145
+        }
+      },
+      {
+        "hour": "2026-09-08T20:00:00+00:00",
+        "hosts_seen": 313,
+        "oci_any (current tool)": 129,
+        "info": 68,
+        "info_or_started": 76,
+        "info_or_started_or_containerheartbeat": 88,
+        "engineinfo": 72,
+        "platforms": {
+          "K8s": 17,
+          "Lin": 135,
+          "Mac": 1,
+          "Win": 160
+        }
+      },
+      {
+        "hour": "2026-09-09T13:00:00+00:00",
+        "hosts_seen": 301,
+        "oci_any (current tool)": 129,
+        "info": 69,
+        "info_or_started": 75,
+        "info_or_started_or_containerheartbeat": 87,
+        "engineinfo": 70,
+        "platforms": {
+          "Android": 1,
+          "K8s": 16,
+          "Lin": 133,
+          "Mac": 1,
+          "Win": 150
+        }
+      },
+      {
+        "hour": "2026-09-10T06:00:00+00:00",
+        "hosts_seen": 322,
+        "oci_any (current tool)": 131,
+        "info": 70,
+        "info_or_started": 75,
+        "info_or_started_or_containerheartbeat": 88,
+        "engineinfo": 71,
+        "platforms": {
+          "Android": 1,
+          "K8s": 16,
+          "Lin": 142,
+          "Mac": 1,
+          "Win": 162
+        }
+      },
+      {
+        "hour": "2026-09-11T23:00:00+00:00",
+        "hosts_seen": 322,
+        "oci_any (current tool)": 138,
+        "info": 70,
+        "info_or_started": 78,
+        "info_or_started_or_containerheartbeat": 89,
+        "engineinfo": 72,
+        "platforms": {
+          "K8s": 15,
+          "Lin": 140,
+          "Mac": 1,
+          "Win": 166
+        }
+      },
+      {
+        "hour": "2026-09-12T16:00:00+00:00",
+        "hosts_seen": 321,
+        "oci_any (current tool)": 136,
+        "info": 70,
+        "info_or_started": 77,
+        "info_or_started_or_containerheartbeat": 89,
+        "engineinfo": 72,
+        "platforms": {
+          "K8s": 15,
+          "Lin": 139,
+          "Mac": 1,
+          "Win": 166
+        }
+      },
+      {
+        "hour": "2026-09-13T09:00:00+00:00",
+        "hosts_seen": 313,
+        "oci_any (current tool)": 137,
+        "info": 70,
+        "info_or_started": 78,
+        "info_or_started_or_containerheartbeat": 89,
+        "engineinfo": 72,
+        "platforms": {
+          "K8s": 15,
+          "Lin": 139,
+          "Mac": 1,
+          "Win": 158
+        }
+      },
+      {
+        "hour": "2026-09-14T02:00:00+00:00",
+        "hosts_seen": 314,
+        "oci_any (current tool)": 137,
+        "info": 70,
+        "info_or_started": 76,
+        "info_or_started_or_containerheartbeat": 89,
+        "engineinfo": 72,
+        "platforms": {
+          "Android": 1,
+          "K8s": 15,
+          "Lin": 139,
+          "Mac": 1,
+          "Win": 158
+        }
+      },
+      {
+        "hour": "2026-09-15T19:00:00+00:00",
+        "hosts_seen": 327,
+        "oci_any (current tool)": 137,
+        "info": 72,
+        "info_or_started": 80,
+        "info_or_started_or_containerheartbeat": 92,
+        "engineinfo": 75,
+        "platforms": {
+          "K8s": 15,
+          "Lin": 140,
+          "Mac": 2,
+          "Win": 170
+        }
+      },
+      {
+        "hour": "2026-09-16T12:00:00+00:00",
+        "hosts_seen": 341,
+        "oci_any (current tool)": 141,
+        "info": 74,
+        "info_or_started": 84,
+        "info_or_started_or_containerheartbeat": 96,
+        "engineinfo": 79,
+        "platforms": {
+          "K8s": 16,
+          "Lin": 144,
+          "Mac": 10,
+          "Win": 171
+        }
+      },
+      {
+        "hour": "2026-09-17T05:00:00+00:00",
+        "hosts_seen": 431,
+        "oci_any (current tool)": 142,
+        "info": 74,
+        "info_or_started": 84,
+        "info_or_started_or_containerheartbeat": 96,
+        "engineinfo": 77,
+        "platforms": {
+          "K8s": 16,
+          "Lin": 144,
+          "Mac": 96,
+          "Win": 175
+        }
+      },
+      {
+        "hour": "2026-09-18T22:00:00+00:00",
+        "hosts_seen": 323,
+        "oci_any (current tool)": 122,
+        "info": 72,
+        "info_or_started": 78,
+        "info_or_started_or_containerheartbeat": 89,
+        "engineinfo": 73,
+        "platforms": {
+          "Android": 2,
+          "K8s": 16,
+          "Lin": 126,
+          "Mac": 2,
+          "Win": 177
+        }
+      },
+      {
+        "hour": "2026-09-19T15:00:00+00:00",
+        "hosts_seen": 317,
+        "oci_any (current tool)": 124,
+        "info": 72,
+        "info_or_started": 77,
+        "info_or_started_or_containerheartbeat": 89,
+        "engineinfo": 71,
+        "platforms": {
+          "K8s": 16,
+          "Lin": 126,
+          "Mac": 2,
+          "Win": 173
+        }
+      },
+      {
+        "hour": "2026-09-20T08:00:00+00:00",
+        "hosts_seen": 316,
+        "oci_any (current tool)": 126,
+        "info": 72,
+        "info_or_started": 79,
+        "info_or_started_or_containerheartbeat": 90,
+        "engineinfo": 71,
+        "platforms": {
+          "K8s": 16,
+          "Lin": 128,
+          "Mac": 2,
+          "Win": 170
+        }
+      },
+      {
+        "hour": "2026-09-21T01:00:00+00:00",
+        "hosts_seen": 320,
+        "oci_any (current tool)": 125,
+        "info": 72,
+        "info_or_started": 79,
+        "info_or_started_or_containerheartbeat": 90,
+        "engineinfo": 71,
+        "platforms": {
+          "K8s": 16,
+          "Lin": 127,
+          "Mac": 2,
+          "Win": 175
+        }
+      },
+      {
+        "hour": "2026-09-22T18:00:00+00:00",
+        "hosts_seen": 339,
+        "oci_any (current tool)": 126,
+        "info": 72,
+        "info_or_started": 79,
+        "info_or_started_or_containerheartbeat": 91,
+        "engineinfo": 71,
+        "platforms": {
+          "Android": 1,
+          "K8s": 16,
+          "Lin": 130,
+          "Mac": 2,
+          "Win": 190
+        }
+      },
+      {
+        "hour": "2026-09-23T11:00:00+00:00",
+        "hosts_seen": 333,
+        "oci_any (current tool)": 120,
+        "info": 64,
+        "info_or_started": 73,
+        "info_or_started_or_containerheartbeat": 85,
+        "engineinfo": 63,
+        "platforms": {
+          "K8s": 15,
+          "Lin": 125,
+          "Mac": 2,
+          "Win": 191
+        }
+      },
+      {
+        "hour": "2026-09-24T04:00:00+00:00",
+        "hosts_seen": 327,
+        "oci_any (current tool)": 118,
+        "info": 65,
+        "info_or_started": 73,
+        "info_or_started_or_containerheartbeat": 86,
+        "engineinfo": 64,
+        "platforms": {
+          "Android": 1,
+          "K8s": 16,
+          "Lin": 123,
+          "Mac": 1,
+          "Win": 186
+        }
+      },
+      {
+        "hour": "2026-09-25T21:00:00+00:00",
+        "hosts_seen": 346,
+        "oci_any (current tool)": 130,
+        "info": 71,
+        "info_or_started": 80,
+        "info_or_started_or_containerheartbeat": 93,
+        "engineinfo": 69,
+        "platforms": {
+          "K8s": 17,
+          "Lin": 134,
+          "Mac": 1,
+          "Win": 194
+        }
+      },
+      {
+        "hour": "2026-09-26T14:00:00+00:00",
+        "hosts_seen": 322,
+        "oci_any (current tool)": 131,
+        "info": 71,
+        "info_or_started": 80,
+        "info_or_started_or_containerheartbeat": 92,
+        "engineinfo": 68,
+        "platforms": {
+          "K8s": 17,
+          "Lin": 133,
+          "Mac": 1,
+          "Win": 171
+        }
+      },
+      {
+        "hour": "2026-09-27T07:00:00+00:00",
+        "hosts_seen": 322,
+        "oci_any (current tool)": 131,
+        "info": 71,
+        "info_or_started": 80,
+        "info_or_started_or_containerheartbeat": 92,
+        "engineinfo": 68,
+        "platforms": {
+          "Android": 1,
+          "K8s": 17,
+          "Lin": 133,
+          "Mac": 1,
+          "Win": 170
+        }
+      },
+      {
+        "hour": "2026-09-28T00:00:00+00:00",
+        "hosts_seen": 322,
+        "oci_any (current tool)": 131,
+        "info": 71,
+        "info_or_started": 78,
+        "info_or_started_or_containerheartbeat": 92,
+        "engineinfo": 69,
+        "platforms": {
+          "Android": 1,
+          "K8s": 17,
+          "Lin": 133,
+          "Mac": 1,
+          "Win": 170
+        }
+      }
+    ]
+  },
+  "step_test": {
+    "per_day": 6,
+    "day_means": {
+      "2026-08-28": {
+        "hosts_seen": 296.5,
+        "oci_any (current tool)": 93.16666666666667,
+        "info": 59.333333333333336,
+        "info_or_started": 68.0,
+        "info_or_started_or_containerheartbeat": 78.16666666666667,
+        "engineinfo": 63.833333333333336
+      },
+      "2026-08-29": {
+        "hosts_seen": 293.3333333333333,
+        "oci_any (current tool)": 119.5,
+        "info": 59.166666666666664,
+        "info_or_started": 70.0,
+        "info_or_started_or_containerheartbeat": 79.83333333333333,
+        "engineinfo": 65.16666666666667
+      },
+      "2026-08-30": {
+        "hosts_seen": 291.8333333333333,
+        "oci_any (current tool)": 120.33333333333333,
+        "info": 59.166666666666664,
+        "info_or_started": 71.0,
+        "info_or_started_or_containerheartbeat": 78.16666666666667,
+        "engineinfo": 63.166666666666664
+      },
+      "2026-08-31": {
+        "hosts_seen": 292.6666666666667,
+        "oci_any (current tool)": 121.0,
+        "info": 59.666666666666664,
+        "info_or_started": 67.66666666666667,
+        "info_or_started_or_containerheartbeat": 79.0,
+        "engineinfo": 65.0
+      },
+      "2026-09-25": {
+        "hosts_seen": 341.5,
+        "oci_any (current tool)": 124.33333333333333,
+        "info": 67.16666666666667,
+        "info_or_started": 76.16666666666667,
+        "info_or_started_or_containerheartbeat": 89.16666666666667,
+        "engineinfo": 65.16666666666667
+      },
+      "2026-09-26": {
+        "hosts_seen": 333.0,
+        "oci_any (current tool)": 130.66666666666666,
+        "info": 71.0,
+        "info_or_started": 80.0,
+        "info_or_started_or_containerheartbeat": 92.5,
+        "engineinfo": 68.66666666666667
+      },
+      "2026-09-27": {
+        "hosts_seen": 325.1666666666667,
+        "oci_any (current tool)": 132.33333333333334,
+        "info": 71.83333333333333,
+        "info_or_started": 80.33333333333333,
+        "info_or_started_or_containerheartbeat": 93.16666666666667,
+        "engineinfo": 68.83333333333333
+      },
+      "2026-09-28": {
+        "hosts_seen": 326.3333333333333,
+        "oci_any (current tool)": 134.66666666666666,
+        "info": 74.16666666666667,
+        "info_or_started": 79.5,
+        "info_or_started_or_containerheartbeat": 95.5,
+        "engineinfo": 72.0
+      }
+    },
+    "steps": [
+      {
+        "date": "2026-09-28",
+        "official_containers": 0.532738095238102,
+        "oci_any (current tool)": 0.48809523809523775,
+        "info": 0.5178571428571431,
+        "info_or_started": 0.42261904761904745,
+        "info_or_started_or_containerheartbeat": 0.5892857142857143,
+        "engineinfo": 0.25
+      },
+      {
+        "date": "2026-09-27",
+        "official_containers": 0.4732142857142776,
+        "oci_any (current tool)": 0.4285714285714291,
+        "info": 0.4523809523809523,
+        "info_or_started": 0.33333333333333315,
+        "info_or_started_or_containerheartbeat": 0.5357142857142857,
+        "engineinfo": 0.2023809523809523
+      },
+      {
+        "date": "2026-09-26",
+        "official_containers": 0.3705357142857224,
+        "oci_any (current tool)": 0.39880952380952345,
+        "info": 0.4226190476190477,
+        "info_or_started": 0.35714285714285715,
+        "info_or_started_or_containerheartbeat": 0.45238095238095255,
+        "engineinfo": 0.125
+      },
+      {
+        "date": "2026-09-25",
+        "official_containers": 0.3779761904761898,
+        "oci_any (current tool)": 1.1130952380952377,
+        "info": 0.2797619047619048,
+        "info_or_started": 0.29166666666666685,
+        "info_or_started_or_containerheartbeat": 0.39285714285714285,
+        "engineinfo": 0.04761904761904771
+      }
+    ],
+    "mean_abs_step_error": {
+      "oci_any (current tool)": 0.2131696428571404,
+      "info": 0.046502976190473624,
+      "info_or_started": 0.0874255952380968,
+      "info_or_started_or_containerheartbeat": 0.0539434523809509,
+      "engineinfo": 0.28236607142857295
+    }
+  }
+}
