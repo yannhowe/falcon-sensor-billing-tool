@@ -3,6 +3,7 @@
 Usage:
     falcon-billing collect [--hourly] [--days N] [--cid CID] [--prune] [--retain-days N]
     falcon-billing query [--hourly | --weekly] [--cid CID] [--output FILE]
+    falcon-billing fetch-billing --cid CID
     falcon-billing multi-tenant [--auto-discover | --cids CID1,CID2 | --cid-file FILE]
     falcon-billing tag-report [--days N] [--output FILE] [--cid CID] [--format pivot|consolidated]
     falcon-billing verify --start-date DATE --end-date DATE [--cid CID]
@@ -63,6 +64,14 @@ def main():
     p_query.add_argument("--cid", default=None, help="Query specific child CID")
     p_query.add_argument("--output", type=Path, help="Write results to CSV file")
 
+    # --- fetch-billing ---
+    p_fetch = subparsers.add_parser(
+        "fetch-billing",
+        help="Fetch authoritative Sensor Usage API totals into billing_averages")
+    p_fetch.add_argument("--cid", required=True,
+                         help="CID to scope the query (selected_cids); the billed total is "
+                              "only valid when scoped to the tenant")
+
     # --- multi-tenant ---
     p_mt = subparsers.add_parser("multi-tenant", help="Multi-tenant chargeback report")
     p_mt_source = p_mt.add_mutually_exclusive_group(required=True)
@@ -118,6 +127,7 @@ def main():
     handlers = {
         "collect": cmd_collect,
         "query": cmd_query,
+        "fetch-billing": cmd_fetch_billing,
         "multi-tenant": cmd_multi_tenant,
         "tag-report": cmd_tag_report,
         "verify": cmd_verify,
@@ -258,6 +268,16 @@ def cmd_query(args):
             json.dump(summary, f, indent=2)
 
         print(f"Results written to {csv_path}")
+
+
+def cmd_fetch_billing(args):
+    from falcon_billing.database import BillingDatabase
+    from falcon_billing.billing import store_billing_averages
+
+    db = BillingDatabase(args.db)
+    rows = store_billing_averages(db, args.cid)
+    db.log_audit("fetch-billing", f"cid={args.cid}, rows={rows}", "cli")
+    print(f"Stored {rows} billing-average date rows for the CID from the Sensor Usage API.")
 
 
 def cmd_multi_tenant(args):

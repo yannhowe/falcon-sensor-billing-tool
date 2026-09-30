@@ -95,3 +95,32 @@ class TestCmdMultiTenant:
             cmd_multi_tenant(args)
 
         assert report.call_args.args[0] == [("cid-a", "cid-a"), ("cid-b", "cid-b")]
+
+
+class TestStoreBillingAverages:
+    def test_scopes_query_and_stores_each_date_row(self, sensor_usage, db):
+        from falcon_billing.billing import store_billing_averages
+
+        sensor_usage.get_hourly_usage.return_value = {"status_code": 200, "body": HOURLY_BODY}
+
+        rows = store_billing_averages(db, TENANT_CID, falcon=sensor_usage)
+
+        # Query is scoped to the tenant, so the total is the billed CID number.
+        filter_string = sensor_usage.get_hourly_usage.call_args.kwargs["filter"]
+        assert "selected_cids:'5ddb" + "0" * 24 + "9a1f'" in filter_string
+
+        # Both date rows land in billing_averages under the CID.
+        assert rows == 2
+        newest = db.get_billing_average("2026-09-28", TENANT_CID)
+        assert newest is not None
+        assert newest["container_hosts"] == pytest.approx(72.875)
+        assert newest["managed_containers"] == pytest.approx(8.81)
+        assert newest["cloud_vms"] == pytest.approx(214.58)
+
+    def test_empty_resources_raises(self, sensor_usage, db):
+        from falcon_billing.billing import store_billing_averages
+
+        sensor_usage.get_hourly_usage.return_value = {"status_code": 200, "body": {"resources": []}}
+
+        with pytest.raises(RuntimeError, match="no rows"):
+            store_billing_averages(db, TENANT_CID, falcon=sensor_usage)
