@@ -124,3 +124,35 @@ class TestStoreBillingAverages:
 
         with pytest.raises(RuntimeError, match="no rows"):
             store_billing_averages(db, TENANT_CID, falcon=sensor_usage)
+
+
+class TestGetSensorUsageDateLag:
+    def test_retries_with_api_reported_latest_valid_date(self, sensor_usage):
+        from falcon_billing.billing import get_sensor_usage
+
+        # First request lands past the API's newest date; the 400 names it.
+        sensor_usage.get_hourly_usage.side_effect = [
+            {"status_code": 400, "body": {"errors": [
+                {"code": 400, "message": "Invalid date, date occurs after the latest valid date: 2026-09-28"},
+            ]}},
+            {"status_code": 200, "body": HOURLY_BODY},
+        ]
+
+        body = get_sensor_usage(sensor_usage, TENANT_CID)
+
+        assert body == HOURLY_BODY
+        assert sensor_usage.get_hourly_usage.call_count == 2
+        retry_filter = sensor_usage.get_hourly_usage.call_args_list[1].kwargs["filter"]
+        assert "event_date:'2026-09-28'" in retry_filter
+
+    def test_400_without_valid_date_raises(self, sensor_usage):
+        from falcon_billing.billing import get_sensor_usage
+
+        sensor_usage.get_hourly_usage.return_value = {
+            "status_code": 400,
+            "body": {"errors": [{"code": 400, "message": "malformed filter"}]},
+        }
+
+        with pytest.raises(RuntimeError, match="malformed filter"):
+            get_sensor_usage(sensor_usage, TENANT_CID)
+        assert sensor_usage.get_hourly_usage.call_count == 1
