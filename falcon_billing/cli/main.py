@@ -259,7 +259,7 @@ def cmd_multi_tenant(args):
     if args.auto_discover:
         cids = auto_discover_child_cids()
     elif args.cids:
-        cids = [c.strip() for c in args.cids.split(",")]
+        cids = load_cid_list(args.cids)
     elif args.cid_file:
         cids = load_cid_list(f"@{args.cid_file}")
     else:
