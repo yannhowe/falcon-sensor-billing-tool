@@ -301,67 +301,33 @@ def cmd_multi_tenant(args):
 
 def cmd_tag_report(args):
     from falcon_billing.database import BillingDatabase
+    from falcon_billing.billing import billing_row_to_skus
 
     db = BillingDatabase(args.db)
-
-    # Use pre-aggregated hourly_tag_counts instead of re-querying NGSIEM
     target_hours = args.days * 24
-    now = datetime.now(timezone.utc)
-    cutoff = (now - timedelta(hours=target_hours)).strftime("%Y-%m-%d %H:%M:%S")
 
-    conn = db.get_connection()
+    # Per-tag showback: each tag's own consumption, dividing sensor-hours by the
+    # full period, the same denominator the CID total uses. A multi-tag host
+    # counts fully under each tag, so the tag totals exceed the CID total by
+    # design.
+    showback = db.calculate_tag_showback(cid=args.cid, days=args.days)
+    tags = showback["tags"]
 
-    # Get collected hours for averaging
-    hours_row = conn.execute(
-        "SELECT COUNT(DISTINCT hour_timestamp) as total_hours "
-        "FROM hourly_counts WHERE hour_timestamp >= ?",
-        (cutoff,),
-    ).fetchone()
-    collected_hours = hours_row["total_hours"] or 1
-
-    # Query per-tag per-SKU aggregates
-    cid_filter = args.cid
-    if cid_filter and cid_filter != "default":
-        cursor = conn.execute(
-            "SELECT tag, "
-            "SUM(unique_sensor_count) as total, "
-            "SUM(COALESCE(fcs_count, 0)) as fcs_total, "
-            "SUM(COALESCE(fcsc_count, 0)) as fcsc_total, "
-            "SUM(COALESCE(fmc_count, 0)) as fmc_total, "
-            "SUM(COALESCE(epp_count, 0)) as epp_total "
-            "FROM hourly_tag_counts "
-            "WHERE hour_timestamp >= ? AND cid = ? "
-            "GROUP BY tag ORDER BY total DESC",
-            (cutoff, cid_filter),
-        )
-    else:
-        cursor = conn.execute(
-            "SELECT tag, "
-            "SUM(unique_sensor_count) as total, "
-            "SUM(COALESCE(fcs_count, 0)) as fcs_total, "
-            "SUM(COALESCE(fcsc_count, 0)) as fcsc_total, "
-            "SUM(COALESCE(fmc_count, 0)) as fmc_total, "
-            "SUM(COALESCE(epp_count, 0)) as epp_total "
-            "FROM hourly_tag_counts "
-            "WHERE hour_timestamp >= ? "
-            "GROUP BY tag ORDER BY total DESC",
-            (cutoff,),
-        )
-
-    rows = []
-    for row in cursor.fetchall():
-        rows.append({
-            "tag": row["tag"],
-            "fcs_28day_avg": f"{row['fcs_total'] / collected_hours:.1f}",
-            "fcsc_28day_avg": f"{row['fcsc_total'] / collected_hours:.1f}",
-            "fmc_28day_avg": f"{row['fmc_total'] / collected_hours:.1f}",
-            "epp_28day_avg": f"{row['epp_total'] / collected_hours:.1f}",
-            "total_28day_avg": f"{row['total'] / collected_hours:.1f}",
-        })
-
-    if not rows:
+    if not tags:
         print("No tag data found. Run 'falcon-billing collect' first.", file=sys.stderr)
         sys.exit(1)
+
+    rows = [
+        {
+            "tag": t["tag"],
+            "fcs_28day_avg": f"{t['fcs']:.1f}",
+            "fcsc_28day_avg": f"{t['fcsc']:.1f}",
+            "fmc_28day_avg": f"{t['fmc']:.1f}",
+            "epp_28day_avg": f"{t['epp']:.1f}",
+            "total_28day_avg": f"{t['total']:.1f}",
+        }
+        for t in tags
+    ]
 
     if args.format == "consolidated":
         # Flat format: one row per tag + license_type combination
@@ -395,8 +361,36 @@ def cmd_tag_report(args):
         writer.writeheader()
         writer.writerows(output_rows)
 
-    print(f"\n{len(rows)} tags, {collected_hours} hours collected (target: {target_hours})", file=sys.stderr)
-    db.log_audit("tag_report", f"days={args.days}, tags={len(rows)}, hours={collected_hours}", "cli")
+    # Show the billed CID total beside the showback so the deliberate overage is
+    # legible. Only meaningful for a specific CID; 'default' sums across CIDs.
+    tag_total_sum = sum(t["total"] for t in tags)
+    print(
+        f"\n{len(tags)} tags, {showback['period_days']}-day window "
+        f"(target {target_hours} hours). Tag consumption totals {tag_total_sum:.1f} "
+        f"licenses summed across tags.",
+        file=sys.stderr,
+    )
+    billed = db.get_latest_billing_average(args.cid) if args.cid and args.cid != "default" else None
+    if billed:
+        skus = billing_row_to_skus(billed)
+        billed_total = skus["fcs"] + skus["fcsc"] + skus["fmc"] + skus["epp"]
+        print(
+            f"Billed CID total (Sensor Usage API, {billed.get('date')}): "
+            f"{billed_total:.1f} licenses "
+            f"(FCS {skus['fcs']:.1f}, FCSC {skus['fcsc']:.1f}, "
+            f"FMC {skus['fmc']:.1f}, EPP {skus['epp']:.1f}). "
+            f"Tag totals exceed this by design because shared hosts count fully "
+            f"under every tag that owns them.",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            "Billed CID total not stored. Run 'falcon-billing fetch-billing --cid <cid>' "
+            "to show it beside the per-tag consumption.",
+            file=sys.stderr,
+        )
+
+    db.log_audit("tag_report", f"days={args.days}, tags={len(tags)}", "cli")
 
 
 def cmd_verify(args):

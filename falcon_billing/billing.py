@@ -69,6 +69,25 @@ def _billing_row(resource: dict) -> dict:
     }
 
 
+def billing_row_to_skus(row: dict) -> dict:
+    """Map a stored billing_averages row to the tool's four SKUs.
+
+    The billed total lands in billing_averages under the API's own field names.
+    The tool reports in FCS/FCSC/FMC/EPP, so this is the single place the two
+    vocabularies meet, shared by the showback and reconciliation views.
+
+    FCS is cloud VMs, FCSC is container hosts, FMC is managed containers (pods),
+    and EPP is on-prem endpoints, which the billed total splits into servers and
+    workstations.
+    """
+    return {
+        "fcs": row.get("cloud_vms") or 0,
+        "fcsc": row.get("container_hosts") or 0,
+        "fmc": row.get("managed_containers") or 0,
+        "epp": (row.get("servers") or 0) + (row.get("workstations") or 0),
+    }
+
+
 def store_billing_averages(db, cid: str, falcon: Optional[SensorUsage] = None) -> int:
     """Fetch the Sensor Usage API for one CID and store its per-date rows.
 
