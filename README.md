@@ -14,7 +14,7 @@ license type, and calculate 28-day rolling averages for FCS/EPP/FCSC/FMC licensi
 |------|------|---------------|
 | **FCS** | Falcon Cloud Security | VMs and servers — cloud or on-prem (any hypervisor or bare-metal server) |
 | **EPP** | Endpoint Protection | Physical workstations, laptops, mobile devices |
-| **FCSC** | Container Security (hosts) | Hosts running OCI containers (`OciContainerStarted` events, not pods) |
+| **FCSC** | Container Security (hosts) | Hosts running OCI containers (`OciContainerInfo` ∪ `OciContainerStarted`, not pods) |
 | **FMC** | Falcon Managed Containers | Kubernetes pods (`SensorHeartbeat` with `ProductType=Pod`) |
 
 **Total sensors = FCS + EPP + FCSC + FMC**
@@ -63,10 +63,10 @@ Or use the all-in-one script (dashboard + background collection every 4h):
 | `humio-auth-proxy:write` | Event Search: Write | **Yes** — submit NGSIEM query jobs |
 | `humio-auth-proxy:read` | Event Search: Read | **Yes** — poll NGSIEM query job results |
 | `sensor-installers:read` | Sensor Download: Read | No — CID auto-detection (falls back to Hosts API if absent) |
-| `sensor-usage-api:read` | Sensor Usage API: Read | No — only for `multi-tenant` command |
+| `sensor-usage-api:read` | Sensor Usage API: Read | No — only for the `multi-tenant` and `fetch-billing` commands (authoritative billed totals) |
 | `mssp:read` | Flight Control: Read | No — child CID discovery for `multi-tenant` command only |
 
-> **The `query`, `verify`, `tag-report`, and `prune` commands read exclusively from the local SQLite database. No API call is made.**
+> **The `query`, `verify`, `tag-report`, and `prune` commands read exclusively from the local SQLite database. No API call is made.** `fetch-billing` is the one command that pulls billed totals from the Sensor Usage API; `verify` then reconciles against what it stored.
 
 ---
 
@@ -77,7 +77,7 @@ NGSIEM (LogScale)
     │
     │  1. Submit hourly query job for each clock hour
     │     - Total active sensors (SensorHeartbeat, NOT pods)
-    │     - Container hosts (OciContainerStarted / OciContainerTelemetry)
+    │     - Container hosts (OciContainerInfo ∪ OciContainerStarted)
     │     - Pods / FMC (SensorHeartbeat with ProductType=Pod)
     ▼
   AIDs (FCS+EPP set, FCSC set, FMC set)
@@ -133,13 +133,15 @@ dashboard. Both are useful: hourly data for auditing, averages for billing.
 ## CLI Commands
 
 ```
-falcon-billing collect      Collect sensor data from NGSIEM + Hosts API
-falcon-billing query        Show 28-day averages from local DB (no API call)
-falcon-billing multi-tenant Multi-tenant chargeback report via Sensor Usage API
-falcon-billing tag-report   Per-tag host/license count via NGSIEM
-falcon-billing verify       Compare local averages vs Sensor Usage API
-falcon-billing prune        Remove old data from database
-falcon-billing dashboard    Start the web dashboard
+falcon-billing collect       Collect sensor data from NGSIEM + Hosts API
+falcon-billing query         Show 28-day averages from local DB (no API call)
+falcon-billing fetch-billing Fetch authoritative billed totals from Sensor Usage API
+falcon-billing verify        Reconcile tool estimate vs billed total per SKU (local DB)
+falcon-billing fcsc-evidence Per-tag container images/engines per host (NGSIEM)
+falcon-billing multi-tenant  Multi-tenant chargeback report via Sensor Usage API
+falcon-billing tag-report    Per-tag host/license showback via local DB
+falcon-billing prune         Remove old data from database
+falcon-billing dashboard     Start the web dashboard
 ```
 
 ### `collect`
@@ -198,6 +200,50 @@ Per-hour breakdown (672 hours):
   ...
 ```
 
+### `fetch-billing`
+
+```bash
+falcon-billing fetch-billing --cid CID     # store billed totals for the CID
+```
+
+The one command that calls the **Sensor Usage API** — the authoritative billing
+source. It stores the billed per-SKU totals into the local `billing_averages`
+table so `verify` can reconcile against them offline. The query is scoped to the
+CID (`selected_cids`); the billed total is only meaningful when scoped to the
+tenant. The API's data lags real time by a few days, so `fetch-billing` targets
+the newest date the API reports rather than a fixed offset.
+
+### `verify`
+
+```bash
+falcon-billing verify --cid CID              # reconcile, 28-day window
+falcon-billing verify --cid CID --days 4     # match a shorter collection window
+falcon-billing verify --cid CID --output /tmp/reconcile.csv
+```
+
+Reconciles the tool's own estimate against the billed total, **per SKU**, reading
+**only** the local database (run `fetch-billing` first to populate the billed
+side). The billed number is authoritative; the tool estimate is a collection
+sanity check, not a competing total.
+
+```
+==========================================================================
+RECONCILIATION — tool estimate vs billed total (CID <CID>, 4-day)
+==========================================================================
+Billed date: 2026-09-28   Collection coverage: 96/96 hours
+
+  SKU       Tool est.       Billed        Gap     Gap %  Direction
+  ------ ------------ ------------ ---------- ---------  ---------
+  FCS          221.26       214.58      +6.68     +3.1%  over
+  FCSC          75.71        72.88      +2.83     +3.9%  over
+  FMC            9.26         8.81      +0.45     +5.1%  over
+  EPP           23.32        24.07      -0.75     -3.1%  under
+```
+
+CSV columns: `sku,tool_estimate,billed,gap,gap_pct,direction`. A coverage line
+below the window flags when the collected hours fall short of the requested
+window, which understates the tool estimate.
+
 ### `tag-report`
 
 ```bash
@@ -207,7 +253,11 @@ falcon-billing tag-report --days 7                 # last 7 days only
 falcon-billing tag-report --output /tmp/tags.csv   # write to file
 ```
 
-Generates per-tag license allocation from the local database. Two output formats:
+Generates a per-tag license **showback** from the local database. Each tag shows
+the full licenses the hosts carrying it consume. A host with several tags counts
+in full under each of them, so the tag totals deliberately **exceed** the CID
+total. This is showback (what each team is responsible for), not allocation
+(slicing one CID total into non-overlapping shares). Two output formats:
 
 - **`pivot`** (default) — one row per tag, columns for each SKU
 - **`consolidated`** — one row per tag + license_type pair (flat format for chargeback systems)
@@ -222,6 +272,34 @@ SensorGroupingTag/prod,FMC,5.7
 SensorGroupingTag/staging,FCS,32.0
 SensorGroupingTag/staging,EPP,12.0
 ```
+
+### `fcsc-evidence`
+
+```bash
+falcon-billing fcsc-evidence --cid CID                     # per-tag container identity
+falcon-billing fcsc-evidence --cid CID --days 7            # tag attribution window
+falcon-billing fcsc-evidence --cid CID --output /tmp/evidence.csv
+```
+
+Justifies the FCSC count by listing, per tag, the container images and engines
+running on each host — the concrete evidence behind a container-host license.
+Queries NGSIEM for `OciContainerInfo` (which carries container identity) unioned
+with `OciContainerStarted`. A host seen only via `OciContainerStarted` runs
+containers on an older sensor build that emits no identity fields, so it is
+flagged `started-only` rather than dropped.
+
+```
+==========================================================================
+FCSC EVIDENCE — container identity per tag (CID <CID>, 28-day tags)
+==========================================================================
+N container host(s) in the evidence window.
+
+  Tag                           Hosts  Started-only  Engines
+  ---------------------------- ------ -------------  --------------------
+  SensorGroupingTag/prod           12             1  docker, containerd
+```
+
+CSV columns: `tag,host,engines,images,started_only`.
 
 ### `prune`
 
@@ -346,16 +424,22 @@ Two queries run per clock hour:
 | select([aid])
 ```
 
-**Container hosts (FCSC)** over the 25 hours ending at the billing hour's end:
+**Container hosts (FCSC)** over the 25 hours ending at the billing hour's end.
+The default unions `OciContainerInfo` with `OciContainerStarted`:
 ```
-#event_simpleName=OciContainerInfo
+#event_simpleName=OciContainerInfo or #event_simpleName=OciContainerStarted
 | groupBy(aid, function=count(), limit=max)
 | select([aid])
 ```
 
 `OciContainerInfo` fires when a container starts and is resent every 24h while it
-runs, so a host with a running container appears within 25h. `Oci*` is not used:
-it also matches `OciContainerTelemetry`, which every Linux host sends daily.
+runs, so a host with a running container appears within 25h. Older sensor builds
+(or hosts with OciContainerSupport off) run containers but never emit
+`OciContainerInfo`; the union with `OciContainerStarted` catches those, which is
+the right showback default. Counting `OciContainerInfo` alone misses ~5 such
+hosts, so it is opt-in via `collect --fcsc-info-only` for a billing-faithful count
+that mirrors what the Sensor Usage API sees. `Oci*` is never matched — it also
+catches `OciContainerTelemetry`, which every Linux host sends daily.
 
 Each active sensor then gets exactly one SKU:
 
@@ -395,7 +479,7 @@ pyinstaller --clean falcon_billing.spec
 
 ```
 falcon_billing/
-  billing.py          # Sensor Usage API queries (multi-tenant command)
+  billing.py          # Sensor Usage API: fetch-billing, verify, multi-tenant
   classifier.py       # Host classification: is_cloud_vm(), classify_sensor()
   collector.py        # NGSIEM queries + Hosts API enrichment + DB writes
   credentials.py      # Credential loading (env vars → Keychain)
@@ -407,7 +491,7 @@ falcon_billing/
     auth.py           # API key authentication
     templates/        # Jinja2 templates
     static/           # CSS and JS
-tests/                # 40 unit tests
+tests/                # 73 unit tests
 falcon_billing.spec   # PyInstaller build spec
 run.sh                # Dashboard + periodic collection script
 ```
