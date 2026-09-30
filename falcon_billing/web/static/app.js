@@ -186,24 +186,25 @@ function displayFCSData(data) {
     const tagTable = document.querySelector('#tag-table-fcs tbody');
     if (tagTable) {
         if (data.tags.length === 0) {
-            tagTable.innerHTML = '<tr><td colspan="5" class="loading">No tag data available</td></tr>';
+            tagTable.innerHTML = '<tr><td colspan="6" class="loading">No tag data available</td></tr>';
         } else {
             tagTable.innerHTML = data.tags.map(tag => `
                 <tr>
                     <td><strong>${escapeHtml(tag.tag)}</strong></td>
-                    <td>${tag.avg_sensors.toFixed(2)}</td>
-                    <td>${tag.max_sensors}</td>
-                    <td>${tag.hours_active}</td>
-                    <td class="licenses-cell">${tag.allocation_units}</td>
+                    <td>${(tag.fcs_avg || 0).toFixed(2)}</td>
+                    <td>${(tag.fcsc_avg || 0).toFixed(2)}</td>
+                    <td>${(tag.fmc_avg || 0).toFixed(2)}</td>
+                    <td>${(tag.epp_avg || 0).toFixed(2)}</td>
+                    <td class="licenses-cell">${(tag.avg_sensors || 0).toFixed(2)}</td>
                 </tr>
             `).join('');
 
-            const totalAllocation = data.tags.reduce((sum, tag) => sum + tag.allocation_units, 0);
+            const totalAvg = data.tags.reduce((sum, tag) => sum + (tag.avg_sensors || 0), 0);
             tagTable.innerHTML += `
                 <tr class="total-row">
                     <td><strong>TOTAL (${data.tags.length} tags)</strong></td>
-                    <td>-</td><td>-</td><td>-</td>
-                    <td class="licenses-cell"><strong>${totalAllocation.toLocaleString()}</strong></td>
+                    <td>-</td><td>-</td><td>-</td><td>-</td>
+                    <td class="licenses-cell"><strong>${totalAvg.toFixed(2)}</strong></td>
                 </tr>
             `;
         }
