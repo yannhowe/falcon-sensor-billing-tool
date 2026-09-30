@@ -234,3 +234,33 @@ class TestContainerHostClassification:
         assert (start, end) == (_iso(hour_end - timedelta(hours=25)), _iso(hour_end))
         assert "#event_simpleName=OciContainerInfo" in query
         assert "Oci*" not in query
+
+
+class TestGapDetection:
+    def test_hours_already_in_sensor_logs_are_not_recollected(self, db):
+        from falcon_billing.collector import get_hours_to_collect
+
+        # Two complete hours inside the lookback, stored in the same "YYYY-MM-DD HH:00:00"
+        # format store_hour_data writes. Gap detection must recognise and skip them.
+        now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+        stored = [now - timedelta(hours=2), now - timedelta(hours=3)]
+        conn = db.get_connection()
+        for h in stored:
+            conn.execute(
+                "INSERT INTO sensor_logs (hour_timestamp, sensor_id, cid, collected_at) "
+                "VALUES (?, ?, ?, ?)",
+                (_hour_str(h), f"s-{h.hour}", "default", "2026-01-01T00:00:00"),
+            )
+        conn.commit()
+
+        missing = {_hour_str(h) for h in get_hours_to_collect(2, db)}
+
+        for h in stored:
+            assert _hour_str(h) not in missing
+
+    def test_missing_hours_are_still_returned(self, db):
+        from falcon_billing.collector import get_hours_to_collect
+
+        # An empty db must report every complete hour in the window as missing.
+        missing = get_hours_to_collect(1, db)
+        assert len(missing) == 24
