@@ -382,9 +382,11 @@ def store_hour_data(
     ]
     skus = assign_skus(sensor_ids, container_ids, enriched)
     counts = {sku: len(aids) for sku, aids in skus.items()}
+    sku_by_sensor = {aid: sku for sku, aids in skus.items() for aid in aids}
     db.store_hour(
         hour_str, cid, sensors_to_insert, len(sensor_ids),
         counts["FCSC"], counts["FMC"], counts["FCS"], counts["EPP"],
+        sku_by_sensor=sku_by_sensor,
     )
     logger.info("Stored %s: FCS=%d EPP=%d FCSC=%d FMC=%d Total=%d",
                 hour_str, counts["FCS"], counts["EPP"], counts["FCSC"], counts["FMC"], len(sensor_ids))

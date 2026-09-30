@@ -25,7 +25,7 @@ from typing import Optional, List, Dict, Tuple
 logger = logging.getLogger(__name__)
 
 # Schema version for database migrations
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 class BillingDatabase:
@@ -108,6 +108,7 @@ class BillingDatabase:
         self._migrate_add_manufacturer_cloud_provider()
         self._migrate_add_epp_count()
         self._migrate_add_product_type_desc()
+        self._migrate_add_tag_sku_counts()
 
         # After all migrations, ensure schema_version reflects current version
         row = conn.execute("SELECT version FROM schema_version").fetchone()
@@ -241,6 +242,22 @@ class BillingDatabase:
         else:
             logger.debug("product_type_desc column already exists")
 
+    def _migrate_add_tag_sku_counts(self):
+        """Add per-SKU count columns to hourly_tag_counts if they don't exist.
+
+        Older databases stored only unique_sensor_count per tag, so the per-tag
+        licensing summary could not split a tag into FCS/FCSC/FMC/EPP. Existing rows
+        keep NULL for the new columns; the summary query coalesces NULL to 0.
+        """
+        conn = self.get_connection()
+        cursor = conn.execute("PRAGMA table_info(hourly_tag_counts)")
+        columns = [row[1] for row in cursor.fetchall()]
+        for column in ("fcs_count", "fcsc_count", "fmc_count", "epp_count"):
+            if column not in columns:
+                logger.info("Adding %s column to hourly_tag_counts...", column)
+                conn.execute(f"ALTER TABLE hourly_tag_counts ADD COLUMN {column} INTEGER")
+        conn.commit()
+
     def _configure(self, conn: sqlite3.Connection):
         """Apply SQLite performance and reliability settings."""
         # WAL mode for better concurrency (readers don't block writers)
@@ -307,6 +324,10 @@ class BillingDatabase:
                 tag TEXT NOT NULL,
                 cid TEXT NOT NULL,
                 unique_sensor_count INTEGER NOT NULL,
+                fcs_count INTEGER,
+                fcsc_count INTEGER,
+                fmc_count INTEGER,
+                epp_count INTEGER,
                 collected_at TEXT NOT NULL,
                 UNIQUE (hour_timestamp, tag, cid)
             )
@@ -668,6 +689,7 @@ class BillingDatabase:
         fmc_count: int,
         fcs_count: int,
         epp_count: int,
+        sku_by_sensor: Optional[Dict[str, str]] = None,
     ):
         """
         Persist one hour's sensor_logs, hourly_counts and hourly_tag_counts atomically.
@@ -683,6 +705,9 @@ class BillingDatabase:
             sensors: Sensor detail dictionaries to log
             total: Total unique sensor count for the hour
             fcsc_count, fmc_count, fcs_count, epp_count: Per-SKU counts
+            sku_by_sensor: Optional sensor_id -> SKU ("FCS"/"FCSC"/"FMC"/"EPP") map.
+                When present, each tag's per-SKU columns are populated from it; when
+                absent, those columns are left NULL.
         """
         with self._transact() as conn:
             for table in ("sensor_logs", "hourly_counts", "hourly_tag_counts"):
@@ -695,7 +720,7 @@ class BillingDatabase:
                 conn, hour_timestamp, cid, total,
                 fcsc_count, fmc_count, fcs_count, epp_count,
             )
-            self._aggregate_tag_counts(conn, hour_timestamp, cid)
+            self._aggregate_tag_counts(conn, hour_timestamp, cid, sku_by_sensor)
 
     def get_sensor_logs_for_range(
         self,
@@ -916,12 +941,19 @@ class BillingDatabase:
             self._aggregate_tag_counts(conn, hour_timestamp, cid)
 
     def _aggregate_tag_counts(
-        self, conn: sqlite3.Connection, hour_timestamp: str, cid: str
+        self,
+        conn: sqlite3.Connection,
+        hour_timestamp: str,
+        cid: str,
+        sku_by_sensor: Optional[Dict[str, str]] = None,
     ):
         """Aggregate this hour's sensor_logs into hourly_tag_counts, no commit.
 
         Reads the sensor_logs rows on the same connection, so within store_hour it sees
-        the just-inserted (uncommitted) rows.
+        the just-inserted (uncommitted) rows. When sku_by_sensor is given, each tag's
+        FCS/FCSC/FMC/EPP columns are tallied from it; a tag's four SKU counts then sum
+        to its unique_sensor_count because a sensor holds exactly one SKU. When it is
+        absent, those columns are written NULL.
         """
         rows = conn.execute(
             """
@@ -965,13 +997,28 @@ class BillingDatabase:
         # Bulk insert tag counts
         now = datetime.now(timezone.utc).isoformat()
         for tag, sensor_set in tag_sensors.items():
+            if sku_by_sensor is None:
+                fcs = fcsc = fmc = epp = None
+            else:
+                fcs = fcsc = fmc = epp = 0
+                for sensor_id in sensor_set:
+                    sku = sku_by_sensor.get(sensor_id)
+                    if sku == "FCS":
+                        fcs += 1
+                    elif sku == "FCSC":
+                        fcsc += 1
+                    elif sku == "FMC":
+                        fmc += 1
+                    elif sku == "EPP":
+                        epp += 1
             conn.execute(
                 """
                 INSERT OR REPLACE INTO hourly_tag_counts (
-                    hour_timestamp, tag, cid, unique_sensor_count, collected_at
-                ) VALUES (?, ?, ?, ?, ?)
+                    hour_timestamp, tag, cid, unique_sensor_count,
+                    fcs_count, fcsc_count, fmc_count, epp_count, collected_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (hour_timestamp, tag, cid, len(sensor_set), now),
+                (hour_timestamp, tag, cid, len(sensor_set), fcs, fcsc, fmc, epp, now),
             )
 
     def get_tag_counts_for_range(
