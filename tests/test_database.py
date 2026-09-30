@@ -153,6 +153,26 @@ class TestStoreHour:
         assert count["unique_sensor_count"] == 2
         assert len(self._log_ids(db)) == count["unique_sensor_count"]
 
+    def _tag_sku_row(self, db, tag, cid="cid1"):
+        return db.get_connection().execute(
+            "SELECT unique_sensor_count, fcs_count, fcsc_count, fmc_count, epp_count "
+            "FROM hourly_tag_counts WHERE hour_timestamp = ? AND tag = ? AND cid = ?",
+            (self.HOUR, tag, cid),
+        ).fetchone()
+
+    def test_store_hour_records_per_tag_sku_breakdown(self, db):
+        # Every sensor carries the same tag but a different SKU, so the tag's per-SKU
+        # counts must split three ways and sum back to the unique sensor count.
+        sensors = [{"sensor_id": i, "tags": ["prod"]} for i in ("a", "b", "c")]
+        sku_by_sensor = {"a": "FCS", "b": "FCSC", "c": "FMC"}
+        db.store_hour(self.HOUR, "cid1", sensors, 3, 1, 1, 1, 0, sku_by_sensor=sku_by_sensor)
+
+        row = self._tag_sku_row(db, "prod")
+        assert row["unique_sensor_count"] == 3
+        assert (row["fcs_count"], row["fcsc_count"], row["fmc_count"], row["epp_count"]) == (1, 1, 1, 0)
+        assert row["fcs_count"] + row["fcsc_count"] + row["fmc_count"] + row["epp_count"] == row["unique_sensor_count"]
+
+
 
 class TestPruning:
     def test_prune_removes_old_data(self, db):
