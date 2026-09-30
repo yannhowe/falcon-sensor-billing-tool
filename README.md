@@ -102,7 +102,7 @@ NGSIEM (LogScale)
 
 ### Classification
 
-Hosts in the NGSIEM anti-join (SensorHeartbeat, not pod, not OCI events) are
+Active sensors that are neither pods nor container hosts are
 either FCS (VMs/servers) or EPP (user endpoints). The goal is to **maximize FCS**
 — any VM or server should be FCS; only physical workstations and laptops are EPP.
 
@@ -337,31 +337,34 @@ echo "my_cid" > ~/.falcon_profile
 
 ## NGSIEM Queries
 
-Three queries run per clock hour:
+Two queries run per clock hour:
 
-**Total active sensors + FCS/EPP set** (anti-join: no pods, no OCI events):
+**Active sensors** in the billing hour:
 ```
-#event_simpleName=SensorHeartbeat ProductType!=Pod
-| selfJoinFilter(aid, where=[
-    {NOT #event_simpleName=OciContainerStarted},
-    {NOT #event_simpleName=OciContainerTelemetry}
-  ], prefilter=#event_simpleName=/SensorHeartbeat|OciContainer/)
-| groupBy(aid)
+#event_simpleName=SensorHeartbeat
+| groupBy(aid, function=count())
+| select([aid])
 ```
 
-**Container hosts (FCSC)** — AIDs with OCI container events, not pods:
+**Container hosts (FCSC)** over the 25 hours ending at the billing hour's end:
 ```
-#event_simpleName=OciContainerStarted OR #event_simpleName=OciContainerTelemetry
-| selfJoinFilter(aid, where=[{#event_simpleName=SensorHeartbeat ProductType!=Pod}],
-    prefilter=#event_simpleName=SensorHeartbeat)
-| groupBy(aid)
+#event_simpleName=OciContainerInfo
+| groupBy(aid, function=count(), limit=max)
+| select([aid])
 ```
 
-**Pods (FMC)**:
-```
-#event_simpleName=SensorHeartbeat ProductType=Pod
-| groupBy(aid)
-```
+`OciContainerInfo` fires when a container starts and is resent every 24h while it
+runs, so a host with a running container appears within 25h. `Oci*` is not used:
+it also matches `OciContainerTelemetry`, which every Linux host sends daily.
+
+Each active sensor then gets exactly one SKU:
+
+- `product_type_desc == 'Pod'` (Hosts API) → **FMC**. Pod sensors send no `OciContainerInfo`.
+- In the container host set → **FCSC**.
+- Otherwise **FCS** or **EPP**, per [Classification](#classification).
+
+If the container host query fails, the hour falls back to the metadata classifier.
+An empty container host set is a normal answer and counts 0 FCSC.
 
 Each query runs as an async job: `POST /humio/api/v1/repositories/search-all/queryjobs`,
 then `GET {endpoint}/{job_id}` until `done: true`.

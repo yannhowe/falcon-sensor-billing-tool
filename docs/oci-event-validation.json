@@ -1,0 +1,383 @@
+{
+  "profile": "talon_1",
+  "window": {
+    "start": "2026-09-29T11:56:00+00:00",
+    "end": "2026-09-30T12:56:00+00:00",
+    "hours": 25
+  },
+  "results": {
+    "per_event": {
+      "query": "#event_simpleName=/^Oci/\n| groupBy([#event_simpleName], function=count(aid, distinct=true, as=hosts), limit=max)",
+      "rows": [
+        {
+          "hosts": "60",
+          "#event_simpleName": "OciContainerComplianceInfo"
+        },
+        {
+          "hosts": "77",
+          "#event_simpleName": "OciContainerEngineInfo"
+        },
+        {
+          "hosts": "98",
+          "#event_simpleName": "OciContainerHeartbeat"
+        },
+        {
+          "hosts": "81",
+          "#event_simpleName": "OciContainerInfo"
+        },
+        {
+          "hosts": "25",
+          "#event_simpleName": "OciContainerPlumbingSummary"
+        },
+        {
+          "hosts": "45",
+          "#event_simpleName": "OciContainerStarted"
+        },
+        {
+          "hosts": "31",
+          "#event_simpleName": "OciContainerStopped"
+        },
+        {
+          "hosts": "136",
+          "#event_simpleName": "OciContainerTelemetry"
+        },
+        {
+          "hosts": "78",
+          "#event_simpleName": "OciImageHeartbeat"
+        },
+        {
+          "hosts": "10",
+          "#event_simpleName": "OciImageInfo"
+        }
+      ],
+      "warnings": {
+        "groupby_fields": "#event_simpleName"
+      }
+    },
+    "per_event_exact": {
+      "query": "#event_simpleName=/^Oci/\n| groupBy([#event_simpleName, aid], limit=max)\n| groupBy([#event_simpleName], function=count(as=hosts), limit=max)",
+      "rows": [
+        {
+          "hosts": "60",
+          "#event_simpleName": "OciContainerComplianceInfo"
+        },
+        {
+          "hosts": "78",
+          "#event_simpleName": "OciContainerEngineInfo"
+        },
+        {
+          "hosts": "99",
+          "#event_simpleName": "OciContainerHeartbeat"
+        },
+        {
+          "hosts": "82",
+          "#event_simpleName": "OciContainerInfo"
+        },
+        {
+          "hosts": "25",
+          "#event_simpleName": "OciContainerPlumbingSummary"
+        },
+        {
+          "hosts": "45",
+          "#event_simpleName": "OciContainerStarted"
+        },
+        {
+          "hosts": "31",
+          "#event_simpleName": "OciContainerStopped"
+        },
+        {
+          "hosts": "137",
+          "#event_simpleName": "OciContainerTelemetry"
+        },
+        {
+          "hosts": "79",
+          "#event_simpleName": "OciImageHeartbeat"
+        },
+        {
+          "hosts": "10",
+          "#event_simpleName": "OciImageInfo"
+        }
+      ],
+      "warnings": {
+        "groupby_fields": "#event_simpleName"
+      }
+    },
+    "heartbeat": {
+      "query": "#event_simpleName=SensorHeartbeat\n| groupBy([event_platform], function=count(aid, distinct=true, as=hosts), limit=max)",
+      "rows": [
+        {
+          "hosts": "2",
+          "event_platform": "Android"
+        },
+        {
+          "hosts": "18",
+          "event_platform": "K8s"
+        },
+        {
+          "hosts": "163",
+          "event_platform": "Lin"
+        },
+        {
+          "hosts": "1",
+          "event_platform": "Mac"
+        },
+        {
+          "hosts": "194",
+          "event_platform": "Win"
+        }
+      ],
+      "warnings": {
+        "groupby_fields": "event_platform"
+      }
+    },
+    "overlap": {
+      "query": "#event_simpleName=SensorHeartbeat or #event_simpleName=/^Oci/\n| ev := #event_simpleName\n| case {\n    ev=\"SensorHeartbeat\" | h := 1;\n    ev=\"OciContainerTelemetry\" | t := 1;\n    ev=\"OciContainerInfo\" | i := 1;\n    ev=\"OciContainerStarted\" | s := 1;\n    ev=\"OciContainerEngineInfo\" | e := 1;\n    * | o := 1 }\n| groupBy(aid, function=[max(h, as=h), max(t, as=t), max(i, as=i), max(s, as=s), max(e, as=e), max(o, as=o), selectLast(event_platform)], limit=max)\n| default(field=[h, t, i, s, e, o], value=0)\n| groupBy([event_platform, h, t, i, s, e, o], function=count(as=hosts), limit=max)",
+      "rows": [
+        {
+          "e": "0",
+          "s": "0",
+          "t": "0",
+          "i": "0",
+          "event_platform": "Android",
+          "hosts": "2",
+          "h": "1",
+          "o": "0"
+        },
+        {
+          "e": "0",
+          "s": "0",
+          "t": "0",
+          "i": "0",
+          "event_platform": "K8s",
+          "hosts": "18",
+          "h": "1",
+          "o": "0"
+        },
+        {
+          "e": "0",
+          "s": "0",
+          "t": "0",
+          "i": "0",
+          "event_platform": "Lin",
+          "hosts": "5",
+          "h": "1",
+          "o": "0"
+        },
+        {
+          "e": "0",
+          "s": "0",
+          "t": "0",
+          "i": "0",
+          "event_platform": "Lin",
+          "hosts": "1",
+          "h": "1",
+          "o": "1"
+        },
+        {
+          "e": "0",
+          "s": "1",
+          "t": "0",
+          "i": "0",
+          "event_platform": "Lin",
+          "hosts": "13",
+          "h": "1",
+          "o": "0"
+        },
+        {
+          "e": "0",
+          "s": "1",
+          "t": "0",
+          "i": "0",
+          "event_platform": "Lin",
+          "hosts": "1",
+          "h": "1",
+          "o": "1"
+        },
+        {
+          "e": "0",
+          "s": "0",
+          "t": "0",
+          "i": "1",
+          "event_platform": "Lin",
+          "hosts": "2",
+          "h": "1",
+          "o": "1"
+        },
+        {
+          "e": "0",
+          "s": "1",
+          "t": "0",
+          "i": "1",
+          "event_platform": "Lin",
+          "hosts": "1",
+          "h": "1",
+          "o": "1"
+        },
+        {
+          "e": "1",
+          "s": "1",
+          "t": "0",
+          "i": "1",
+          "event_platform": "Lin",
+          "hosts": "3",
+          "h": "1",
+          "o": "1"
+        },
+        {
+          "e": "0",
+          "s": "0",
+          "t": "1",
+          "i": "0",
+          "event_platform": "Lin",
+          "hosts": "40",
+          "h": "1",
+          "o": "0"
+        },
+        {
+          "e": "0",
+          "s": "0",
+          "t": "1",
+          "i": "0",
+          "event_platform": "Lin",
+          "hosts": "18",
+          "h": "1",
+          "o": "1"
+        },
+        {
+          "e": "0",
+          "s": "1",
+          "t": "1",
+          "i": "0",
+          "event_platform": "Lin",
+          "hosts": "3",
+          "h": "1",
+          "o": "1"
+        },
+        {
+          "e": "1",
+          "s": "0",
+          "t": "1",
+          "i": "1",
+          "event_platform": "Lin",
+          "hosts": "52",
+          "h": "1",
+          "o": "1"
+        },
+        {
+          "e": "0",
+          "s": "1",
+          "t": "1",
+          "i": "1",
+          "event_platform": "Lin",
+          "hosts": "1",
+          "h": "1",
+          "o": "1"
+        },
+        {
+          "e": "1",
+          "s": "1",
+          "t": "1",
+          "i": "1",
+          "event_platform": "Lin",
+          "hosts": "23",
+          "h": "1",
+          "o": "1"
+        },
+        {
+          "e": "0",
+          "s": "0",
+          "t": "0",
+          "i": "0",
+          "event_platform": "Mac",
+          "hosts": "1",
+          "h": "1",
+          "o": "0"
+        },
+        {
+          "e": "0",
+          "s": "0",
+          "t": "0",
+          "i": "0",
+          "event_platform": "Win",
+          "hosts": "194",
+          "h": "1",
+          "o": "0"
+        }
+      ],
+      "warnings": {
+        "groupby_fields": "event_platform, h, t, i, s, e, o"
+      }
+    },
+    "info_retransmit": {
+      "query": "#event_simpleName=OciContainerInfo\n| case { OciContainerInfoRetransmitted=1 | r := 1; * | r := 0 }\n| groupBy(aid, function=min(r, as=all_retx), limit=max)\n| groupBy([all_retx], function=count(as=hosts))",
+      "rows": [
+        {
+          "hosts": "27",
+          "all_retx": "0"
+        },
+        {
+          "hosts": "55",
+          "all_retx": "1"
+        }
+      ],
+      "warnings": {
+        "groupby_fields": "all_retx"
+      }
+    },
+    "started_rundown": {
+      "query": "#event_simpleName=OciContainerStarted\n| case { OciContainerIsRundown=1 | r := 1; * | r := 0 }\n| groupBy(aid, function=min(r, as=all_rundown), limit=max)\n| groupBy([all_rundown], function=count(as=hosts))",
+      "rows": [
+        {
+          "hosts": "45",
+          "all_rundown": "0"
+        }
+      ],
+      "warnings": {
+        "groupby_fields": "all_rundown"
+      }
+    },
+    "telemetry_activity": {
+      "query": "#event_simpleName=OciContainerTelemetry\n| groupBy(aid, function=max(OciContainersStartedCount, as=started), limit=max)\n| case { test(started > 0) | active := 1; * | active := 0 }\n| groupBy([active], function=count(as=hosts))",
+      "rows": [
+        {
+          "hosts": "101",
+          "active": "0"
+        },
+        {
+          "hosts": "36",
+          "active": "1"
+        }
+      ],
+      "warnings": {
+        "groupby_fields": "active"
+      }
+    }
+  },
+  "cross_check": {
+    "OciContainerTelemetry": {
+      "per_event": 137,
+      "overlap_sum": 137,
+      "agree": true
+    },
+    "OciContainerInfo": {
+      "per_event": 82,
+      "overlap_sum": 82,
+      "agree": true
+    },
+    "OciContainerStarted": {
+      "per_event": 45,
+      "overlap_sum": 45,
+      "agree": true
+    },
+    "OciContainerEngineInfo": {
+      "per_event": 78,
+      "overlap_sum": 78,
+      "agree": true
+    },
+    "SensorHeartbeat": {
+      "per_event": 378,
+      "overlap_sum": 378,
+      "agree": true
+    }
+  }
+}

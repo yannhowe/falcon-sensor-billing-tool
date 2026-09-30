@@ -34,112 +34,20 @@ OUTPUT_DIR = os.environ.get("USAGE_LOG_DIR", "/var/log/falcon-usage")
 # Number of days to retrieve (default: 28 days for standard billing period)
 PERIOD_DAYS = int(os.environ.get("PERIOD_DAYS", "28"))
 
-# Optional: Comma-separated list of child CIDs to query
-SELECTED_CIDS = os.environ.get("SELECTED_CIDS", "")
+def normalize_cid(cid: str) -> str:
+    """Return the CID form `selected_cids` accepts: lowercase, without the -XX checksum."""
+    return cid.split("-")[0].lower()
 
 
-def get_sensor_usage(hourly: bool = False) -> dict:
-    """Query Sensor Usage API for single CID.
-
-    Args:
-        hourly: If True, retrieve hourly average; otherwise weekly average.
-
-    Returns:
-        API response body dict.
-
-    Raises:
-        SystemExit on API error.
-    """
-    creds = load_credentials()
-    client_id = creds["client_id"]
-    client_secret = creds["client_secret"]
-    cloud_region = creds["cloud_region"]
-
-    base_url = REGION_MAP.get(cloud_region)
-    if not base_url:
-        logger.error("Invalid cloud region: %s. Valid regions: %s", cloud_region, ", ".join(REGION_MAP.keys()))
-        raise ValueError(f"Invalid cloud region: {cloud_region}")
-
-    falcon = SensorUsage(
-        client_id=client_id,
-        client_secret=client_secret,
-        base_url=base_url,
-    )
-
+def get_sensor_usage(falcon: SensorUsage, cid: str) -> dict:
     end_date = (datetime.now() - timedelta(days=2)).strftime("%Y-%m-%d")
-    filter_parts = [f"event_date:'{end_date}'", f"period:'{PERIOD_DAYS}'"]
+    filter_string = f"event_date:'{end_date}',period:'{PERIOD_DAYS}',selected_cids:'{normalize_cid(cid)}'"
 
-    if SELECTED_CIDS:
-        cids = SELECTED_CIDS.strip()
-        filter_parts.append(f"selected_cids:'{cids}'")
-
-    filter_string = ",".join(filter_parts)
-
-    try:
-        if hourly:
-            response = falcon.get_hourly_usage(filter=filter_string)
-        else:
-            response = falcon.get_weekly_usage(filter=filter_string)
-
-        if response["status_code"] != 200:
-            error_msg = response.get("body", {}).get("errors", ["Unknown error"])
-            logger.error("API request failed (HTTP %s): %s", response["status_code"], error_msg)
-            raise RuntimeError(f"API request failed (HTTP {response['status_code']}): {error_msg}")
-
-        return response["body"]
-
-    except (RuntimeError, ValueError):
-        raise
-    except Exception as e:
-        logger.error("Failed to retrieve usage data: %s", e)
-        raise RuntimeError(f"Failed to retrieve usage data: {e}") from e
-
-
-def get_sensor_usage_for_cid(cid: str, hourly: bool = False) -> Optional[dict]:
-    """Query Sensor Usage API for a specific child CID.
-
-    Args:
-        cid: Child CID to query.
-        hourly: If True, retrieve hourly average; otherwise weekly average.
-
-    Returns:
-        API response body dict, or None on failure.
-    """
-    creds = load_credentials()
-    client_id = creds["client_id"]
-    client_secret = creds["client_secret"]
-    cloud_region = creds["cloud_region"]
-
-    base_url = REGION_MAP.get(cloud_region)
-    if not base_url:
-        logger.warning("Invalid cloud region: %s", cloud_region)
-        return None
-
-    falcon = SensorUsage(
-        client_id=client_id,
-        client_secret=client_secret,
-        base_url=base_url,
-    )
-
-    end_date = (datetime.now() - timedelta(days=2)).strftime("%Y-%m-%d")
-    filter_string = f"event_date:'{end_date}',period:'{PERIOD_DAYS}',selected_cids:'{cid}'"
-
-    try:
-        if hourly:
-            response = falcon.get_sensor_usage_hourly_average(filter=filter_string)
-        else:
-            response = falcon.get_sensor_usage_weekly_average(filter=filter_string)
-
-        if response["status_code"] != 200:
-            error_msg = response.get("body", {}).get("errors", ["Unknown error"])
-            logger.warning("Failed to query CID %s: %s", cid, error_msg)
-            return None
-
-        return response["body"]
-
-    except Exception as e:
-        logger.warning("Failed to query CID %s: %s", cid, e)
-        return None
+    response = falcon.get_hourly_usage(filter=filter_string)
+    if response["status_code"] != 200:
+        errors = response.get("body", {}).get("errors") or ["Unknown error"]
+        raise RuntimeError(f"HTTP {response['status_code']}: {errors}")
+    return response["body"]
 
 
 def auto_discover_child_cids() -> List[tuple]:
@@ -219,21 +127,27 @@ def auto_discover_child_cids() -> List[tuple]:
 def generate_multitenant_report(
     cids: List[tuple],
     output_path: Optional[str] = None,
-    hourly: bool = False,
 ) -> str:
-    """Generate chargeback report for multiple tenants.
-
+    """
     Args:
         cids: List of (cid, name) tuples.
         output_path: Directory to write the report CSV. Defaults to OUTPUT_DIR.
-        hourly: If True, use hourly averages; otherwise weekly.
 
     Returns:
         Path to the saved report CSV file.
     """
-    endpoint_label = "hourly" if hourly else "weekly"
     output_dir = output_path or OUTPUT_DIR
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    creds = load_credentials()
+    base_url = REGION_MAP.get(creds["cloud_region"])
+    if not base_url:
+        raise ValueError(f"Invalid cloud region: {creds['cloud_region']}")
+    falcon = SensorUsage(
+        client_id=creds["client_id"],
+        client_secret=creds["client_secret"],
+        base_url=base_url,
+    )
 
     logger.info("Querying %d tenant CIDs...", len(cids))
 
@@ -241,43 +155,38 @@ def generate_multitenant_report(
     for idx, (cid, name) in enumerate(cids, 1):
         logger.info("[%d/%d] Querying %s (%s)...", idx, len(cids), name, cid)
 
-        data = get_sensor_usage_for_cid(cid, hourly=hourly)
+        try:
+            data = get_sensor_usage(falcon, cid)
+        except Exception as e:
+            raise RuntimeError(f"Sensor Usage query failed for tenant {name} ({cid}): {e}") from e
+        if not data.get("resources"):
+            raise RuntimeError(f"Sensor Usage returned no rows for tenant {name} ({cid})")
 
-        if data and data.get("resources"):
-            latest = data["resources"][0]
-            results.append({
-                "tenant_name": name,
-                "cid": cid,
-                "date": latest.get("date", ""),
-                "managed_containers": latest.get("lumos", 0),
-                "cloud_vms": latest.get("public_cloud_without_containers", 0),
-                "servers": latest.get("servers_without_containers", 0),
-                "workstations": latest.get("workstations", 0),
-            })
-        else:
-            results.append({
-                "tenant_name": name,
-                "cid": cid,
-                "date": "",
-                "managed_containers": 0,
-                "cloud_vms": 0,
-                "servers": 0,
-                "workstations": 0,
-            })
+        latest = data["resources"][0]
+        results.append({
+            "tenant_name": name,
+            "cid": cid,
+            "date": latest.get("date", ""),
+            "container_hosts": latest.get("containers", 0),
+            "managed_containers": latest.get("lumos", 0),
+            "cloud_vms": latest.get("public_cloud_without_containers", 0),
+            "servers": latest.get("servers_without_containers", 0),
+            "workstations": latest.get("workstations", 0),
+        })
 
     os.makedirs(output_dir, exist_ok=True)
-    report_file = os.path.join(
-        output_dir, f"multitenant_chargeback_{endpoint_label}_{timestamp}.csv"
-    )
+    report_file = os.path.join(output_dir, f"multitenant_chargeback_hourly_{timestamp}.csv")
 
-    fieldnames = ["tenant_name", "cid", "date", "managed_containers", "cloud_vms", "servers", "workstations"]
+    fieldnames = [
+        "tenant_name", "cid", "date", "container_hosts",
+        "managed_containers", "cloud_vms", "servers", "workstations",
+    ]
     with open(report_file, "w", newline="") as csvfile:
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(results)
 
-    total_fmc = sum(r["managed_containers"] for r in results)
-    logger.info("Multi-tenant report saved to %s (total billable: %.2f FMC sensors)", report_file, total_fmc)
+    logger.info("Multi-tenant report saved to %s (%d tenants)", report_file, len(results))
 
     return report_file
 

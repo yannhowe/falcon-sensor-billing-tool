@@ -260,6 +260,40 @@ def is_cloud_vm(manufacturer=None, cloud_provider=None, tags=None, product_type_
     return False
 
 
+def _as_json_list(value):
+    return value if isinstance(value, str) else json.dumps(value or [])
+
+
+def assign_skus(sensor_ids, container_ids, hosts):
+    container_set = set(container_ids or ())
+    skus = {"FCS": [], "EPP": [], "FCSC": [], "FMC": []}
+    for aid in sensor_ids:
+        meta = hosts.get(aid, {})
+        if meta.get("product_type_desc") == "Pod":
+            sku = "FMC"
+        elif container_ids is None:
+            sku = classify_sensor(
+                hostname=meta.get("hostname"),
+                platform_name=meta.get("platform_name"),
+                tags=_as_json_list(meta.get("tags")),
+                groups=_as_json_list(meta.get("groups")),
+            )
+        elif aid in container_set:
+            sku = "FCSC"
+        else:
+            sku = "FCS"
+
+        if sku in ("FCS", "EPP"):
+            sku = "FCS" if is_cloud_vm(
+                manufacturer=meta.get("manufacturer"),
+                cloud_provider=meta.get("cloud_provider"),
+                tags=meta.get("tags"),
+                product_type_desc=meta.get("product_type_desc"),
+            ) else "EPP"
+        skus[sku].append(aid)
+    return skus
+
+
 def classify_cloud_provider(hostname, platform_name, tags):
     """Classify cloud provider based on hostname patterns, platform, and tags.
 

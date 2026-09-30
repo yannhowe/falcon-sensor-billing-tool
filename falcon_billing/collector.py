@@ -4,7 +4,6 @@ Collects active sensor data from NGSIEM (primary) or Hosts API (fallback),
 enriches with host metadata, and stores in the billing database.
 """
 
-import json
 import logging
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -14,13 +13,12 @@ from typing import Dict, List, Optional, Tuple
 
 from falconpy import Hosts, OAuth2
 
+from falcon_billing.classifier import assign_skus
 from falcon_billing.credentials import load_credentials
 from falcon_billing.database import BillingDatabase
 from falcon_billing.ngsiem import (
     query_ngsiem_for_sensors,
-    query_ngsiem_for_fcs,
     query_ngsiem_for_container_hosts,
-    query_ngsiem_for_container_hosts_24h,
     NgsiemQueryFailed,
 )
 
@@ -298,292 +296,25 @@ def process_hourly_collection(
     falcon_client: Optional[Hosts] = None
 ) -> Tuple[int, int, int]:
     """
-    Process hourly sensor collection for a specific clock hour.
-
-    Workflow:
-    1. Query NGSIEM for active sensors (fallback to Hosts API if unavailable)
-    2. Enrich with host metadata using smart caching
-    3. Store in sensor_logs table
-    4. Calculate and store hourly_counts
-    5. Aggregate and store hourly_tag_counts
-    6. Return metrics
-
     Args:
         db: BillingDatabase instance
         hour: Target clock hour to collect
         cid: Optional child CID
-        falcon_client: FalconPy Hosts client (only needed if NGSIEM unavailable)
 
     Returns:
         tuple: (total_sensors, cache_hits, api_calls)
     """
-    # Get actual CID from API if not provided
-    if not cid or cid == 'default':
-        cid = get_falcon_cid()
-
-    hour_str = hour.strftime('%Y-%m-%d %H:00:00')
-    hour_end = hour + timedelta(hours=1)
-
-    # Format ISO-8601 timestamps for NGSIEM module
-    hour_start_iso = hour.strftime('%Y-%m-%dT%H:%M:%SZ')
-    hour_end_iso = hour_end.strftime('%Y-%m-%dT%H:%M:%SZ')
-
-    logger.info(f"Processing collection for hour: {hour_str} (CID: {cid})")
-
-    # Step 1: Query for active sensors
-    # Try NGSIEM first, fall back to Hosts API if NGSIEM fails
-    sensor_ids = []
-
-    try:
-        logger.info("Attempting NGSIEM query for accurate sensor tracking...")
-        creds = load_credentials()
-        sensor_ids = query_ngsiem_for_sensors(
-            hour_start=hour_start_iso,
-            hour_end=hour_end_iso,
-            cid=cid,
-            client_id=creds["client_id"],
-            client_secret=creds["client_secret"],
-            cloud_region=creds["cloud_region"],
-        )
-        logger.info(f"NGSIEM query successful: {len(sensor_ids)} sensors")
-
-    except NgsiemQueryFailed:
-        logger.warning("NGSIEM failed after retries, falling back to Hosts API")
-        if falcon_client is None:
-            falcon_client = get_falcon_client()
-        sensor_ids = query_hosts_api_for_active_sensors(
-            falcon_client, hour, hour_end, cid
-        )
-
-    if not sensor_ids:
-        logger.warning(f"No sensors found for hour {hour_str}")
-        # Still record zero count
-        db.insert_hourly_count(hour_str, cid, 0)
-        return 0, 0, 0
-
-    logger.info(f"Found {len(sensor_ids)} unique sensors for hour {hour_str}")
-
-    # Query FCSC — OCI container runtime hosts using 24h lookback, intersected
-    # with sensors active in this billing hour. This avoids missing container hosts
-    # that didn't emit OCI events in the specific billing hour.
-    # Falls back to metadata-based classification if data is unavailable (e.g.
-    # retention period has aged out the OCI events for older billing hours).
-    fcsc_count = None
-    container_ids = []
-    fcsc_from_metadata = False
-    try:
-        creds = load_credentials()
-        container_ids_24h = query_ngsiem_for_container_hosts_24h(
-            hour_start=hour_start_iso, hour_end=hour_end_iso, cid=cid,
-            client_id=creds["client_id"], client_secret=creds["client_secret"],
-            cloud_region=creds["cloud_region"],
-        )
-        # Intersect with sensors active in this billing hour
-        container_ids = [aid for aid in container_ids_24h if aid in sensor_ids]
-        fcsc_count = len(container_ids)
-        if fcsc_count == 0 and len(sensor_ids) > 0:
-            # Zero OCI events could mean data aged out of retention.
-            # Fall back to metadata-based classification.
-            logger.warning(
-                "FCSC 24h lookback returned 0 container hosts but %d sensors active — "
-                "OCI event data may have aged out of retention. Falling back to metadata classification.",
-                len(sensor_ids),
-            )
-            fcsc_from_metadata = True
-        else:
-            logger.info(f"FCSC (container hosts): {fcsc_count} for hour {hour_str} (24h lookback found {len(container_ids_24h)}, {fcsc_count} active this hour)")
-    except NgsiemQueryFailed:
-        logger.warning("FCSC query failed — falling back to metadata classification")
-        fcsc_from_metadata = True
-
-    # FMC (pod sensors) cannot be identified via NGSIEM — ProductType is not a field
-    # in SensorHeartbeat or Oci* events. Pod sensors emit Oci* events and land in the
-    # FCSC bucket. They are split out after enrichment using product_type_desc == "Pod"
-    # from the Hosts API. fmc_count and fmc_ids are populated below after enrichment.
-    fmc_count = None
-    fmc_ids = []
-
-    # FCS IDs (total minus FCSC minus FMC) are derived after enrichment below.
-    fcs_ids = None
-    fcs_count = None
-    container_id_set = set(container_ids) if container_ids else set()
-
-    # Step 2: Enrich with host metadata (smart caching)
     if falcon_client is None:
         falcon_client = get_falcon_client()
-    enriched = enrich_sensors_with_host_details(falcon_client, db, sensor_ids)
-
-    # If OCI event data was unavailable (retention aged out, query failed),
-    # fall back to metadata-based classification for FCSC/FCS/EPP split.
-    from falcon_billing.classifier import is_cloud_vm, classify_sensor
-    if fcsc_from_metadata:
-        logger.info("Using metadata-based classification (OCI events unavailable)")
-        container_ids = []
-        fmc_ids_meta = []
-        fcs_ids = []
-        epp_ids = []
-        for aid in sensor_ids:
-            meta = enriched.get(aid, {})
-            classification = classify_sensor(
-                hostname=meta.get('hostname'),
-                platform_name=meta.get('platform_name'),
-                tags=meta.get('tags'),
-                groups=meta.get('groups'),
-            )
-            if classification == "FCSC":
-                container_ids.append(aid)
-            elif classification == "FMC":
-                fmc_ids_meta.append(aid)
-            elif classification == "FCS":
-                fcs_ids.append(aid)
-            else:
-                epp_ids.append(aid)
-        fcsc_count = len(container_ids)
-        fmc_ids = fmc_ids_meta
-        fmc_count = len(fmc_ids)
-        fcs_count = len(fcs_ids)
-        fcs_final = 0
-        epp_count = 0
-        # Further classify FCS into true cloud VMs vs EPP
-        for aid in fcs_ids:
-            meta = enriched.get(aid, {})
-            if is_cloud_vm(
-                manufacturer=meta.get('manufacturer'),
-                cloud_provider=meta.get('cloud_provider'),
-                tags=meta.get('tags'),
-                product_type_desc=meta.get('product_type_desc'),
-            ):
-                fcs_final += 1
-            else:
-                epp_count += 1
-        epp_count += len(epp_ids)
-        fcs_count = fcs_final
-        logger.info(
-            f"Metadata classification: FCSC={fcsc_count}, FCS={fcs_final}, EPP={epp_count}, FMC={fmc_count} for hour {hour_str}"
-        )
-    else:
-        # Normal path: split FMC pods out of FCSC using product_type_desc from Hosts API.
-        # ProductType is not a NGSIEM field — pod sensors emit Oci* events so they land
-        # in container_ids. Reclassify any with product_type_desc == "Pod" as FMC.
-        if fcsc_count is not None:
-            fmc_ids = [aid for aid in container_ids
-                       if enriched.get(aid, {}).get('product_type_desc') == 'Pod']
-            container_ids = [aid for aid in container_ids if aid not in set(fmc_ids)]
-            fcsc_count = len(container_ids)
-            fmc_count = len(fmc_ids)
-            logger.info(f"Post-enrichment split: FCSC={fcsc_count}, FMC={fmc_count} for hour {hour_str}")
-
-        # Derive FCS IDs: total minus FCSC minus FMC
-        container_id_set = set(container_ids)
-        fmc_id_set = set(fmc_ids)
-        fcs_ids = [aid for aid in sensor_ids if aid not in container_id_set and aid not in fmc_id_set]
-        fcs_count = len(fcs_ids)
-        logger.info(f"FCS (raw, before classification): {fcs_count} for hour {hour_str}")
-
-        # Classify fcs_ids into FCS (VMs/servers) vs EPP (user endpoints)
-        fcs_final = None
-        epp_count = None
-        if fcs_ids is not None:
-            fcs_final = 0
-            epp_count = 0
-            for aid in fcs_ids:
-                meta = enriched.get(aid, {})
-                if is_cloud_vm(
-                    manufacturer=meta.get('manufacturer'),
-                    cloud_provider=meta.get('cloud_provider'),
-                    tags=meta.get('tags'),
-                    product_type_desc=meta.get('product_type_desc'),
-                ):
-                    fcs_final += 1
-                else:
-                    epp_count += 1
-            fcs_count = fcs_final
-            logger.info(f"FCS (VMs/servers): {fcs_final}, EPP (endpoints): {epp_count} for hour {hour_str}")
-
-    # Tally check
-    if all(v is not None for v in [fcsc_count, fmc_count, fcs_final, epp_count]):
-        tally = fcs_final + epp_count + fcsc_count + fmc_count
-        total = len(sensor_ids)
-        if tally == total:
-            logger.info(f"Tally OK: FCS({fcs_final}) + EPP({epp_count}) + FCSC({fcsc_count}) + FMC({fmc_count}) = {tally} == Total({total})")
-        else:
-            logger.warning(f"Tally MISMATCH: FCS({fcs_final}) + EPP({epp_count}) + FCSC({fcsc_count}) + FMC({fmc_count}) = {tally} != Total({total})")
-
-    # Calculate cache metrics
-    cache_hits, cache_misses, hit_rate = db.cache_hit_rate(sensor_ids, max_age_hours=24)
-    api_calls = cache_misses
-
-    # Step 3: Bulk insert into sensor_logs
-    # Build sensor_type_map from classification results
-    sensor_type_map = {}
-    if all(v is not None for v in [fcsc_count, fmc_count, fcs_final, epp_count]):
-        for aid in container_ids:
-            sensor_type_map[aid] = "FCSC"
-        for aid in fmc_ids:
-            sensor_type_map[aid] = "FMC"
-        # fcs_ids were split into fcs_final (cloud VMs) and epp
-        # We need to re-classify to assign the right type
-        if fcs_ids is not None:
-            for aid in fcs_ids:
-                meta = enriched.get(aid, {})
-                if is_cloud_vm(
-                    manufacturer=meta.get('manufacturer'),
-                    cloud_provider=meta.get('cloud_provider'),
-                    tags=meta.get('tags'),
-                    product_type_desc=meta.get('product_type_desc'),
-                ):
-                    sensor_type_map[aid] = "FCS"
-                else:
-                    sensor_type_map[aid] = "EPP"
-
-    sensors_to_insert = []
-    for sensor_id in sensor_ids:
-        if sensor_id in enriched:
-            sensors_to_insert.append(enriched[sensor_id])
-        else:
-            # Sensor not enriched (API failure) - store minimal data
-            logger.warning(f"Sensor {sensor_id} not enriched, storing minimal data")
-            sensors_to_insert.append({
-                'sensor_id': sensor_id,
-                'hostname': None,
-                'platform_name': None,
-                'platform_version': None,
-                'os_version': None,
-                'status': None,
-                'last_seen': None,
-                'groups': [],
-                'tags': [],
-                'cid': cid
-            })
-
-    db.insert_sensor_logs(hour_str, sensors_to_insert, cid, sensor_type_map=sensor_type_map)
-    logger.info(f"Inserted {len(sensors_to_insert)} sensor logs")
-
-    # Step 4: Calculate and store hourly count
-    unique_count = len(sensor_ids)
-    db.insert_hourly_count(hour_str, cid, unique_count, fcsc_count, fmc_count, fcs_count, epp_count)
-    logger.info(f"Stored hourly count: Total={unique_count}, FCS={fcs_count}, EPP={epp_count}, FCSC={fcsc_count}, FMC={fmc_count}")
-
-    # Step 5: Aggregate tag counts
-    db.aggregate_tag_counts(hour_str, cid)
-    logger.info(f"Aggregated tag counts for hour {hour_str}")
-
-    # Return metrics
-    return unique_count, cache_hits, api_calls
+    _, cid, sensor_ids, container_ids = fetch_hour_sensors(hour, cid, falcon_client)
+    return store_hour_data(db, hour, cid, sensor_ids, falcon_client, container_ids)
 
 
 def fetch_hour_sensors(
     hour: datetime,
     cid: str,
     falcon_client,
-) -> Tuple[datetime, str, List[str], Optional[List[str]], Optional[List[str]], Optional[List[str]]]:
-    """
-    Query all 4 NGSIEM queries for a single hour. No DB interaction.
-    Returns (hour, resolved_cid, sensor_ids, fcsc_ids, fmc_ids, fcs_ids).
-    Individual lists are None if that query failed.
-    """
-    from falcon_billing.credentials import load_credentials
-
+) -> Tuple[datetime, str, List[str], Optional[List[str]]]:
     if not cid or cid == 'default':
         cid = get_falcon_cid()
 
@@ -591,9 +322,8 @@ def fetch_hour_sensors(
     hour_start_iso = hour.strftime('%Y-%m-%dT%H:%M:%SZ')
     hour_end_iso = hour_end.strftime('%Y-%m-%dT%H:%M:%SZ')
 
-    # Q1: Total
+    creds = load_credentials()
     try:
-        creds = load_credentials()
         sensor_ids = query_ngsiem_for_sensors(
             hour_start=hour_start_iso, hour_end=hour_end_iso, cid=cid,
             client_id=creds["client_id"], client_secret=creds["client_secret"],
@@ -603,46 +333,17 @@ def fetch_hour_sensors(
         logger.warning("NGSIEM total query failed for %s, falling back to Hosts API", hour_start_iso)
         sensor_ids = query_hosts_api_for_active_sensors(falcon_client, hour, hour_end, cid)
 
-    # Q2: FCSC — use 24h lookback to catch container hosts that didn't emit
-    # OCI events in this specific billing hour (stable long-running containers).
-    # FMC pod sensors also emit Oci* events so they appear here too; they are
-    # split out in store_hour_data using product_type_desc from the Hosts API.
-    fcsc_ids = None
     try:
-        creds = load_credentials()
-        fcsc_ids_24h = query_ngsiem_for_container_hosts_24h(
-            hour_start=hour_start_iso, hour_end=hour_end_iso, cid=cid,
+        container_ids = query_ngsiem_for_container_hosts(
+            hour_end_iso, cid,
             client_id=creds["client_id"], client_secret=creds["client_secret"],
             cloud_region=creds["cloud_region"],
         )
-        # Intersect with sensors active in this billing hour
-        sensor_id_set = set(sensor_ids)
-        fcsc_ids = [aid for aid in fcsc_ids_24h if aid in sensor_id_set]
     except NgsiemQueryFailed:
-        logger.warning("FCSC query failed for %s", hour_start_iso)
+        logger.warning("Container host query failed for %s, classifying from host metadata", hour_start_iso)
+        container_ids = None
 
-    # FMC is derived post-enrichment in store_hour_data using product_type_desc.
-    # Pass None here so store_hour_data knows to perform the split.
-    fmc_ids = None
-
-    # FCS — derive from total minus combined FCSC+FMC bucket; FMC split happens in store_hour_data
-    fcs_ids = None
-    if fcsc_ids is not None:
-        fcsc_set = set(fcsc_ids)
-        fcs_ids = [aid for aid in sensor_ids if aid not in fcsc_set]
-    else:
-        # Fall back to NGSIEM FCS query if FCSC query failed
-        try:
-            creds = load_credentials()
-            fcs_ids = query_ngsiem_for_fcs(
-                hour_start=hour_start_iso, hour_end=hour_end_iso, cid=cid,
-                client_id=creds["client_id"], client_secret=creds["client_secret"],
-                cloud_region=creds["cloud_region"],
-            )
-        except NgsiemQueryFailed:
-            logger.warning("FCS query failed for %s", hour_start_iso)
-
-    return hour, cid, sensor_ids, fcsc_ids, fmc_ids, fcs_ids
+    return hour, cid, sensor_ids, container_ids
 
 
 def store_hour_data(
@@ -651,151 +352,37 @@ def store_hour_data(
     cid: str,
     sensor_ids: List[str],
     falcon_client,
-    fcsc_ids: Optional[List[str]] = None,
-    fmc_ids: Optional[List[str]] = None,
-    fcs_ids: Optional[List[str]] = None,
+    container_ids: Optional[List[str]],
 ) -> Tuple[int, int, int]:
-    """Store pre-fetched sensor IDs for a single hour. Returns (unique_count, cache_hits, api_calls)."""
-    from falcon_billing.classifier import is_cloud_vm, classify_sensor
-
     hour_str = hour.strftime('%Y-%m-%d %H:00:00')
-
-    fcsc_count = len(fcsc_ids) if fcsc_ids is not None else None
-    fmc_count = len(fmc_ids) if fmc_ids is not None else None
-
     if not sensor_ids:
         logger.warning("No sensors found for hour %s", hour_str)
-        db.insert_hourly_count(hour_str, cid, 0, fcsc_count, fmc_count, None, None)
-        return 0, 0, 0
 
     enriched = enrich_sensors_with_host_details(falcon_client, db, sensor_ids)
     cache_hits, cache_misses, _ = db.cache_hit_rate(sensor_ids, max_age_hours=24)
 
-    sensors_to_insert = []
-    for sensor_id in sensor_ids:
-        if sensor_id in enriched:
-            sensors_to_insert.append(enriched[sensor_id])
-        else:
-            sensors_to_insert.append({
-                'sensor_id': sensor_id,
-                'hostname': None, 'platform_name': None, 'platform_version': None,
-                'os_version': None, 'status': None, 'last_seen': None,
-                'groups': [], 'tags': [], 'cid': cid,
-            })
+    sensors_to_insert = [
+        enriched.get(sensor_id) or {
+            'sensor_id': sensor_id,
+            'hostname': None, 'platform_name': None, 'platform_version': None,
+            'os_version': None, 'status': None, 'last_seen': None,
+            'groups': [], 'tags': [], 'cid': cid,
+        }
+        for sensor_id in sensor_ids
+    ]
+    db.insert_sensor_logs(hour_str, sensors_to_insert, cid)
 
-    unique_count = len(sensor_ids)
-
-    # Split FMC pod sensors out of FCSC using product_type_desc from enriched Hosts API data.
-    # ProductType is not a NGSIEM field — pod sensors emit Oci* events so they land in
-    # fcsc_ids. Reclassify any with product_type_desc == "Pod" as FMC here.
-    if fcsc_ids is not None:
-        fmc_from_fcsc = [aid for aid in fcsc_ids
-                         if enriched.get(aid, {}).get('product_type_desc') == 'Pod']
-        fcsc_ids = [aid for aid in fcsc_ids if aid not in set(fmc_from_fcsc)]
-        fmc_ids = fmc_from_fcsc
-        logger.info(
-            "Post-enrichment split for %s: FCSC=%d, FMC=%d",
-            hour_str, len(fcsc_ids), len(fmc_ids),
-        )
-
-    fcsc_count = len(fcsc_ids) if fcsc_ids is not None else None
-    fmc_count = len(fmc_ids) if fmc_ids is not None else None
-
-    # If FCSC came back as 0 but we have sensors, OCI event data may have
-    # aged out of NGSIEM retention. Fall back to metadata-based classification.
-    _used_metadata_fallback = False
-    if fcsc_ids is not None and len(fcsc_ids) == 0 and fmc_count == 0 and len(sensor_ids) > 0:
-        _used_metadata_fallback = True
-        logger.warning(
-            "FCSC 24h lookback returned 0 container hosts but %d sensors active for %s — "
-            "falling back to metadata classification",
-            len(sensor_ids), hour_str,
-        )
-        meta_fcsc = []
-        meta_fmc = []
-        meta_fcs = []
-        meta_epp = []
-        for aid in sensor_ids:
-            meta = enriched.get(aid, {})
-            classification = classify_sensor(
-                hostname=meta.get('hostname'),
-                platform_name=meta.get('platform_name'),
-                tags=meta.get('tags') if isinstance(meta.get('tags'), str) else
-                     (json.dumps(meta.get('tags')) if meta.get('tags') else None),
-                groups=meta.get('groups') if isinstance(meta.get('groups'), str) else
-                       (json.dumps(meta.get('groups')) if meta.get('groups') else None),
-            )
-            if classification == "FCSC":
-                meta_fcsc.append(aid)
-            elif classification == "FMC":
-                meta_fmc.append(aid)
-            elif classification == "FCS":
-                meta_fcs.append(aid)
-            else:
-                meta_epp.append(aid)
-        fcsc_count = len(meta_fcsc)
-        fmc_count = len(meta_fmc)
-        fcs_ids = meta_fcs + meta_epp  # will be split by is_cloud_vm below
-        logger.info(
-            "Metadata classification for %s: FCSC=%d, FMC=%d, remaining=%d",
-            hour_str, fcsc_count, fmc_count, len(fcs_ids),
-        )
-
-    # Classify fcs_ids into FCS (VMs/servers) vs EPP (user endpoints)
-    fcs_final = None
-    epp_count = None
-    sensor_type_map = {}
-    # Populate sensor_type_map for FCSC and FMC from known ID lists
-    if _used_metadata_fallback:
-        for aid in meta_fcsc:
-            sensor_type_map[aid] = "FCSC"
-        for aid in meta_fmc:
-            sensor_type_map[aid] = "FMC"
-    else:
-        if fcsc_ids is not None:
-            for aid in fcsc_ids:
-                sensor_type_map[aid] = "FCSC"
-        if fmc_ids is not None:
-            for aid in fmc_ids:
-                sensor_type_map[aid] = "FMC"
-        # Recompute fcs_ids after FMC split so pods are excluded
-        if fcsc_ids is not None:
-            excluded = set(fcsc_ids) | set(fmc_ids or [])
-            fcs_ids = [aid for aid in sensor_ids if aid not in excluded]
-
-    if fcs_ids is not None:
-        fcs_final = 0
-        epp_count = 0
-        for aid in fcs_ids:
-            meta = enriched.get(aid, {})
-            if is_cloud_vm(
-                manufacturer=meta.get('manufacturer'),
-                cloud_provider=meta.get('cloud_provider'),
-                tags=meta.get('tags'),
-                product_type_desc=meta.get('product_type_desc'),
-            ):
-                fcs_final += 1
-                sensor_type_map[aid] = "FCS"
-            else:
-                epp_count += 1
-                sensor_type_map[aid] = "EPP"
-
-    # Now insert sensor_logs with sensor_type
-    db.insert_sensor_logs(hour_str, sensors_to_insert, cid, sensor_type_map=sensor_type_map)
-
-    db.insert_hourly_count(hour_str, cid, unique_count, fcsc_count, fmc_count, fcs_final, epp_count)
+    skus = assign_skus(sensor_ids, container_ids, enriched)
+    counts = {sku: len(aids) for sku, aids in skus.items()}
+    db.insert_hourly_count(
+        hour_str, cid, len(sensor_ids),
+        counts["FCSC"], counts["FMC"], counts["FCS"], counts["EPP"],
+    )
     db.aggregate_tag_counts(hour_str, cid)
+    logger.info("Stored %s: FCS=%d EPP=%d FCSC=%d FMC=%d Total=%d",
+                hour_str, counts["FCS"], counts["EPP"], counts["FCSC"], counts["FMC"], len(sensor_ids))
 
-    if all(v is not None for v in [fcs_final, epp_count, fcsc_count, fmc_count]):
-        tally = fcs_final + epp_count + fcsc_count + fmc_count
-        if tally == unique_count:
-            logger.info("Tally OK: FCS(%d) + EPP(%d) + FCSC(%d) + FMC(%d) = %d == Total(%d)",
-                        fcs_final, epp_count, fcsc_count, fmc_count, tally, unique_count)
-        else:
-            logger.warning("Tally MISMATCH: FCS(%d) + EPP(%d) + FCSC(%d) + FMC(%d) = %d != Total(%d)",
-                           fcs_final, epp_count, fcsc_count, fmc_count, tally, unique_count)
-
-    return unique_count, cache_hits, cache_misses
+    return len(sensor_ids), cache_hits, cache_misses
 
 
 def parallel_backfill(
@@ -812,8 +399,8 @@ def parallel_backfill(
     logger.info("Parallel backfill: %d hours with %d workers", len(hours), workers)
 
     # Phase 1: fetch all hours in parallel
-    results: Dict[datetime, Tuple[str, List[str]]] = {}
-    errors: Dict[datetime, Exception] = {}
+    results: Dict[datetime, Tuple[str, List[str], Optional[List[str]]]] = {}
+    fetch_errors: Dict[datetime, Exception] = {}
 
     with ThreadPoolExecutor(max_workers=workers) as executor:
         future_to_hour = {
@@ -825,24 +412,39 @@ def parallel_backfill(
             hour = future_to_hour[future]
             completed += 1
             try:
-                _, resolved_cid, sensor_ids, fcsc_ids, fmc_ids, fcs_ids = future.result()
-                results[hour] = (resolved_cid, sensor_ids, fcsc_ids, fmc_ids, fcs_ids)
+                _, resolved_cid, sensor_ids, container_ids = future.result()
+                results[hour] = (resolved_cid, sensor_ids, container_ids)
             except Exception as exc:
                 logger.error("Fetch failed for %s: %s", hour, exc)
-                errors[hour] = exc
+                fetch_errors[hour] = exc
             if completed % 24 == 0:
                 logger.info("Fetched %d/%d hours", completed, len(hours))
 
-    if errors:
-        logger.warning("%d hours failed to fetch and will be skipped", len(errors))
+    if fetch_errors:
+        logger.warning("%d hours failed to fetch and will be skipped", len(fetch_errors))
 
     # Phase 2: store sequentially in chronological order
     logger.info("Storing %d hours to database...", len(results))
+    store_errors: Dict[datetime, Exception] = {}
     for i, hour in enumerate(sorted(results.keys()), 1):
-        resolved_cid, sensor_ids, fcsc_ids, fmc_ids, fcs_ids = results[hour]
-        store_hour_data(db, hour, resolved_cid, sensor_ids, falcon_client, fcsc_ids, fmc_ids, fcs_ids)
+        resolved_cid, sensor_ids, container_ids = results[hour]
+        try:
+            store_hour_data(db, hour, resolved_cid, sensor_ids, falcon_client, container_ids)
+        except Exception as exc:
+            logger.error("Store failed for %s: %s", hour, exc)
+            store_errors[hour] = exc
         if i % 24 == 0:
             logger.info("Stored %d/%d hours", i, len(results))
+
+    failures = [
+        f"{phase} {hour.strftime('%Y-%m-%d %H:00:00')}: {exc}"
+        for phase, phase_errors in (("fetch", fetch_errors), ("store", store_errors))
+        for hour, exc in sorted(phase_errors.items())
+    ]
+    if failures:
+        raise RuntimeError(
+            f"Backfill failed for {len(failures)} of {len(hours)} hours: " + "; ".join(failures)
+        )
 
 
 # ============================================================================

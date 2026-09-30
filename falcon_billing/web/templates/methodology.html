@@ -17,34 +17,34 @@
 <section class="data-section">
     <h2>Step 1: Hourly Sensor Collection</h2>
     <div class="methodology-content">
-        <p>Every clock hour, four NGSIEM queries run against the Falcon data lake:</p>
+        <p>Every clock hour, two NGSIEM queries run against the Falcon data lake, and the Hosts API identifies pods:</p>
         <table>
             <thead>
                 <tr>
-                    <th>Query</th>
+                    <th>Source</th>
                     <th>What it finds</th>
                     <th>License type</th>
                 </tr>
             </thead>
             <tbody>
                 <tr>
-                    <td><strong>Total sensors</strong></td>
-                    <td>SensorHeartbeat (not pods), anti-joined with OCI container events</td>
-                    <td>FCS + EPP pool</td>
-                </tr>
-                <tr>
-                    <td><strong>Container hosts (FCSC)</strong></td>
-                    <td>AIDs with OciContainerStarted / OciContainerTelemetry events</td>
-                    <td>FCSC</td>
+                    <td><strong>Active sensors</strong></td>
+                    <td>SensorHeartbeat in the billing hour</td>
+                    <td>All sensors</td>
                 </tr>
                 <tr>
                     <td><strong>Pods (FMC)</strong></td>
-                    <td>SensorHeartbeat with ProductType=Pod</td>
+                    <td>Active sensors with product_type_desc Pod (Hosts API)</td>
                     <td>FMC</td>
                 </tr>
                 <tr>
+                    <td><strong>Container hosts (FCSC)</strong></td>
+                    <td>Other active sensors that sent OciContainerInfo in the 25 hours ending at the billing hour's end</td>
+                    <td>FCSC</td>
+                </tr>
+                <tr>
                     <td><strong>FCS candidates</strong></td>
-                    <td>Total minus FCSC minus FMC (anti-join)</td>
+                    <td>All remaining active sensors</td>
                     <td>FCS or EPP (needs classification)</td>
                 </tr>
             </tbody>
