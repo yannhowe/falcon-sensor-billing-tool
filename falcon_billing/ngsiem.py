@@ -6,6 +6,7 @@ Implements exponential timeout escalation with configurable retries.
 
 import logging
 import time
+from datetime import datetime, timedelta
 from typing import Optional
 
 import requests
@@ -26,38 +27,15 @@ _BULK_SENSOR_QUERY = """
 | groupBy([hour_key, aid], function=count())
 """
 
-# FCS query: SensorHeartbeat AIDs that did NOT emit any OCI container events (FCSC hosts).
-# ProductType is not a field in SensorHeartbeat or Oci* events — FMC pod sensors are
-# identified after enrichment using product_type_desc from the Hosts API instead.
-_FCS_QUERY = """
-#event_simpleName=SensorHeartbeat
-| groupBy([aid])
-| !join(query={
-    #event_simpleName=Oci*
-    | groupBy([aid])
-  }, field=[aid], key=[aid], mode=inner)
-| select([aid])
-"""
-
-# FCSC query: AIDs that emitted any OCI container event (container runtime hosts).
-# Uses wildcard Oci* to catch all container-related events (OciContainerStarted,
-# OciContainerTelemetry, OciContainerStopped, OciContainerExec, etc.).
-# Note: ProductType is not a field in Oci* events. FMC pod sensors that also emit
-# OCI events are reclassified post-enrichment using product_type_desc from the Hosts API.
+# OciContainerInfo fires when a container starts and is resent every 24h while
+# it runs.
 _CONTAINER_HOST_QUERY = """
-#event_simpleName=Oci*
-| groupBy(aid, function=count())
+#event_simpleName=OciContainerInfo
+| groupBy(aid, function=count(), limit=max)
 | select([aid])
 """
 
-# FCSC query with 24h lookback: finds container hosts that emitted Oci* events in the last 24h
-# AND had a SensorHeartbeat in the billing hour. This avoids missing hosts that didn't
-# start/stop containers in the specific billing hour but are still container hosts.
-_CONTAINER_HOST_24H_QUERY = """
-#event_simpleName=Oci*
-| groupBy(aid, function=count())
-| select([aid])
-"""
+CONTAINER_HOST_LOOKBACK = timedelta(hours=25)
 
 
 class NgsiemQueryFailed(Exception):
@@ -338,40 +316,7 @@ def query_ngsiem_for_sensors(
     )
 
 
-def query_ngsiem_for_fcs(
-    hour_start: str,
-    hour_end: str,
-    cid: str,
-    *,
-    client_id: str,
-    client_secret: str,
-    cloud_region: str = "us-1",
-    view_name: str = "search-all",
-    max_retries: int = 3,
-    timeout_sequence: tuple[int, ...] = (30, 60, 120),
-) -> list[str]:
-    """Query NGSIEM for FCS AIDs (SensorHeartbeat with no OCI events).
-
-    Uses !join anti-join to exclude any AID that also appears in OCI container events
-    (FCSC hosts). FMC pod sensors are reclassified post-enrichment using product_type_desc
-    from the Hosts API, not via a NGSIEM query.
-    """
-    return query_ngsiem_for_sensors(
-        hour_start,
-        hour_end,
-        cid,
-        client_id=client_id,
-        client_secret=client_secret,
-        cloud_region=cloud_region,
-        view_name=view_name,
-        max_retries=max_retries,
-        timeout_sequence=timeout_sequence,
-        query_string=_FCS_QUERY,
-    )
-
-
 def query_ngsiem_for_container_hosts(
-    hour_start: str,
     hour_end: str,
     cid: str,
     *,
@@ -382,45 +327,8 @@ def query_ngsiem_for_container_hosts(
     max_retries: int = 3,
     timeout_sequence: tuple[int, ...] = (30, 60, 120),
 ) -> list[str]:
-    """Query NGSIEM for FCSC container host AIDs (AIDs that emitted Oci* events)."""
-    return query_ngsiem_for_sensors(
-        hour_start,
-        hour_end,
-        cid,
-        client_id=client_id,
-        client_secret=client_secret,
-        cloud_region=cloud_region,
-        view_name=view_name,
-        max_retries=max_retries,
-        timeout_sequence=timeout_sequence,
-        query_string=_CONTAINER_HOST_QUERY,
-    )
-
-
-def query_ngsiem_for_container_hosts_24h(
-    hour_start: str,
-    hour_end: str,
-    cid: str,
-    *,
-    client_id: str,
-    client_secret: str,
-    cloud_region: str = "us-1",
-    view_name: str = "search-all",
-    max_retries: int = 3,
-    timeout_sequence: tuple[int, ...] = (30, 60, 120),
-) -> list[str]:
-    """Query NGSIEM for FCSC container host AIDs using a 24h lookback window.
-
-    Looks back 24h from hour_end for any Oci* events to identify container hosts,
-    rather than just the 1-hour billing window. This catches hosts that are running
-    containers but didn't emit OCI events in the specific billing hour.
-    """
-    from datetime import datetime, timedelta, timezone
-
-    # Parse hour_end and look back 24h
     dt_end = datetime.fromisoformat(hour_end.replace("Z", "+00:00"))
-    dt_start_24h = dt_end - timedelta(hours=24)
-    lookback_start = dt_start_24h.strftime("%Y-%m-%dT%H:%M:%SZ")
+    lookback_start = (dt_end - CONTAINER_HOST_LOOKBACK).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     return query_ngsiem_for_sensors(
         lookback_start,
@@ -432,7 +340,7 @@ def query_ngsiem_for_container_hosts_24h(
         view_name=view_name,
         max_retries=max_retries,
         timeout_sequence=timeout_sequence,
-        query_string=_CONTAINER_HOST_24H_QUERY,
+        query_string=_CONTAINER_HOST_QUERY,
     )
 
 

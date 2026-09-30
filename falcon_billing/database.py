@@ -717,8 +717,6 @@ class BillingDatabase:
             hour_timestamp: Clock hour in UTC
             cid: Child CID or 'default'
             count: Total unique sensor count (all SensorHeartbeat AIDs)
-            fcsc_count: FCSC — OCI events with ProductType!=Pod
-            fmc_count: FMC — SensorHeartbeat with ProductType=Pod
             fcs_count: FCS — cloud VMs only (classified via manufacturer/cloud_provider)
             epp_count: EPP — on-prem endpoints (fcs_ids minus cloud VMs)
         """
