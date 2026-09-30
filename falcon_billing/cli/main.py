@@ -7,6 +7,7 @@ Usage:
     falcon-billing multi-tenant [--auto-discover | --cids CID1,CID2 | --cid-file FILE]
     falcon-billing tag-report [--days N] [--output FILE] [--cid CID] [--format pivot|consolidated]
     falcon-billing verify [--cid CID] [--days N] [--output FILE]
+    falcon-billing fcsc-evidence [--cid CID] [--days N] [--output FILE]
     falcon-billing prune [--retain-days N] [--dry-run]
     falcon-billing dashboard [--port PORT] [--host HOST] [--no-auth]
 """
@@ -99,6 +100,15 @@ def main():
                           help="Rolling window in days for the tool estimate (default: 28)")
     p_verify.add_argument("--output", type=Path, help="Write reconciliation CSV")
 
+    # --- fcsc-evidence ---
+    p_evid = subparsers.add_parser(
+        "fcsc-evidence",
+        help="Justify FCSC per tag: container images and engines per host (NGSIEM)")
+    p_evid.add_argument("--cid", default="default", help="Target CID")
+    p_evid.add_argument("--days", type=int, default=28,
+                        help="Window for host tag attribution in days (default: 28)")
+    p_evid.add_argument("--output", type=Path, help="Write per-host evidence CSV")
+
     # --- prune ---
     p_prune = subparsers.add_parser("prune", help="Remove old data from database")
     p_prune.add_argument("--retain-days", type=int, default=395,
@@ -133,6 +143,7 @@ def main():
         "multi-tenant": cmd_multi_tenant,
         "tag-report": cmd_tag_report,
         "verify": cmd_verify,
+        "fcsc-evidence": cmd_fcsc_evidence,
         "prune": cmd_prune,
         "dashboard": cmd_dashboard,
     }
@@ -402,6 +413,17 @@ def cmd_verify(args):
     db = BillingDatabase(args.db)
     generate_reconciliation(db, cid=args.cid, days=args.days, output_path=args.output)
     db.log_audit("verify", f"cid={args.cid}, days={args.days}", "cli")
+
+
+def cmd_fcsc_evidence(args):
+    from falcon_billing.database import BillingDatabase
+    from falcon_billing.collector import fetch_container_evidence, generate_fcsc_evidence
+
+    db = BillingDatabase(args.db)
+    evidence = fetch_container_evidence(cid=args.cid)
+    generate_fcsc_evidence(db, evidence, cid=args.cid, days=args.days,
+                           output_path=args.output)
+    db.log_audit("fcsc-evidence", f"cid={args.cid}, hosts={len(evidence)}", "cli")
 
 
 def cmd_prune(args):

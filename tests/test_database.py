@@ -245,3 +245,33 @@ class TestCalculate28DayAverage:
 
         avg = db.calculate_28day_average("default")["averages"]["total"]
         assert avg == pytest.approx(50.0, abs=0.1)
+
+
+class TestGetHostTagsForRange:
+    def test_unions_tags_across_hours_and_normalizes_double_encoding(self, db):
+        # Same host, two hours, different tags: the union is the attribution set.
+        db.store_hour("2026-04-21 10:00:00", "cid1",
+                      [{"sensor_id": "h1", "tags": ["team-a"]}], 1, 1, 0, 0, 0)
+        db.store_hour("2026-04-21 11:00:00", "cid1",
+                      [{"sensor_id": "h1", "tags": ["team-b"]}], 1, 1, 0, 0, 0)
+        # A double-JSON-encoded tags column, as some collectors wrote.
+        db.get_connection().execute(
+            "UPDATE sensor_logs SET tags = ? WHERE sensor_id = 'h1' "
+            "AND hour_timestamp = '2026-04-21 11:00:00'",
+            (json.dumps(json.dumps(["team-b", "team-c"])),),
+        )
+        db.get_connection().commit()
+
+        host_tags = db.get_host_tags_for_range(
+            "2026-04-21 00:00:00", "2026-04-21 23:00:00", "cid1")
+
+        assert sorted(host_tags["h1"]) == ["team-a", "team-b", "team-c"]
+
+    def test_untagged_host_maps_to_empty_list(self, db):
+        db.store_hour("2026-04-21 10:00:00", "cid1",
+                      [{"sensor_id": "h1", "tags": []}], 1, 1, 0, 0, 0)
+
+        host_tags = db.get_host_tags_for_range(
+            "2026-04-21 00:00:00", "2026-04-21 23:00:00", "cid1")
+
+        assert host_tags["h1"] == []

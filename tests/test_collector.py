@@ -346,3 +346,66 @@ class TestGenerateReconciliation:
         assert not (tmp_path / "recon.csv").exists()
         err = capsys.readouterr().err
         assert "fetch-billing" in err
+
+
+class TestGenerateFcscEvidence:
+    def _seed_hosts(self, db, sensors, fcsc):
+        now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+        hour = now.strftime("%Y-%m-%d %H:%M:%S")
+        db.store_hour(hour, "cid1", sensors, total=len(sensors),
+                      fcsc_count=fcsc, fmc_count=0, fcs_count=0, epp_count=0)
+
+    def test_rolls_evidence_up_per_tag_with_engines(self, tmp_path, db):
+        from falcon_billing.collector import generate_fcsc_evidence
+
+        self._seed_hosts(db, [
+            {"sensor_id": "aid-docker", "tags": ["SensorGroupingTag/prod"]},
+            {"sensor_id": "aid-started", "tags": ["SensorGroupingTag/prod"]},
+        ], fcsc=2)
+
+        evidence = {
+            "aid-docker": {"names": ["web"], "images": ["sha256:aaa"],
+                           "engines": ["docker"], "started_only": False},
+            "aid-started": {"names": [], "images": [], "engines": [],
+                            "started_only": True},
+            # In NG-SIEM but never collected by the tool: a coverage gap.
+            "aid-ghost": {"names": [], "images": [], "engines": [],
+                          "started_only": True},
+        }
+
+        out = tmp_path / "evidence.csv"
+        result = generate_fcsc_evidence(db, evidence, cid="cid1", days=1,
+                                        output_path=str(out))
+
+        assert result == str(out)
+        with open(out) as f:
+            rows = list(csv.DictReader(f))
+
+        prod = [r for r in rows if r["tag"] == "SensorGroupingTag/prod"]
+        assert {r["host"] for r in prod} == {"aid-dock…", "aid-star…"}
+        docker_row = next(r for r in prod if r["engines"] == "docker")
+        assert docker_row["images"] == "sha256:aaa"
+        assert docker_row["started_only"] == "no"
+        started_row = next(r for r in prod if r["started_only"] == "yes")
+        assert started_row["engines"] == ""
+
+        # The uncollected host is attributed to a distinct coverage bucket, not prod.
+        ghost = [r for r in rows if r["tag"] == "(Not collected)"]
+        assert len(ghost) == 1
+        assert ghost[0]["host"] == "aid-ghos…"
+
+    def test_masks_agent_ids_in_output(self, tmp_path, db):
+        from falcon_billing.collector import generate_fcsc_evidence
+
+        full_aid = "0123456789abcdef0123456789abcdef"
+        self._seed_hosts(db, [{"sensor_id": full_aid,
+                               "tags": ["SensorGroupingTag/prod"]}], fcsc=1)
+        evidence = {full_aid: {"names": [], "images": ["img"],
+                               "engines": ["docker"], "started_only": False}}
+
+        out = tmp_path / "evidence.csv"
+        generate_fcsc_evidence(db, evidence, cid="cid1", days=1, output_path=str(out))
+
+        text = out.read_text()
+        assert full_aid not in text
+        assert "01234567…" in text

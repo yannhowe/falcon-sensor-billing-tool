@@ -20,6 +20,7 @@ from falcon_billing.database import BillingDatabase
 from falcon_billing.ngsiem import (
     query_ngsiem_for_sensors,
     query_ngsiem_for_container_hosts,
+    query_ngsiem_for_container_evidence,
     NgsiemQueryFailed,
 )
 
@@ -598,6 +599,113 @@ def generate_reconciliation(
             writer.writeheader()
             writer.writerows(rows)
         logger.info("Reconciliation written to %s", output_path)
+        return str(output_path)
+
+    return None
+
+
+def _mask_aid(aid: str) -> str:
+    """Show enough of an agent ID to tell hosts apart, never the whole ID."""
+    return f"{aid[:8]}…" if len(aid) > 8 else aid
+
+
+def fetch_container_evidence(cid: str = "default", hour_end: Optional[str] = None) -> Dict[str, dict]:
+    """Run the live FCSC evidence query for one CID over the 25h lookback.
+
+    Thin wrapper over the NG-SIEM evidence query that resolves the real CID and
+    the current hour, and loads credentials the same way collection does. Returns
+    the parsed aid -> identity mapping. Kept separate from the rollup so the
+    rollup can be exercised without the network.
+    """
+    if not cid or cid == "default":
+        cid = get_falcon_cid()
+    if hour_end is None:
+        now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+        hour_end = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    creds = load_credentials()
+    return query_ngsiem_for_container_evidence(
+        hour_end, cid,
+        client_id=creds["client_id"], client_secret=creds["client_secret"],
+        cloud_region=creds["cloud_region"],
+    )
+
+
+def generate_fcsc_evidence(
+    db: BillingDatabase,
+    evidence: Dict[str, dict],
+    cid: str = "default",
+    days: int = 28,
+    output_path: Optional[str] = None,
+) -> Optional[str]:
+    """Roll live FCSC evidence up per tag to justify each container-host bill.
+
+    Joins the per-host container identity from NG-SIEM to the tags the tool
+    already stored for each host, then rolls up per tag: how many hosts, how
+    many are Started-only with no image identity, and which engines and images
+    ran. A host billed FCSC becomes legible instead of asserted. A host in the
+    evidence the tool never collected buckets under "(Not collected)", which is
+    a coverage gap worth seeing.
+
+    Returns the CSV path when output_path is given, else None.
+    """
+    now = datetime.now(timezone.utc)
+    start_dt = datetime(now.year, now.month, now.day, tzinfo=timezone.utc) - timedelta(days=days)
+    host_tags = db.get_host_tags_for_range(
+        start_dt.strftime("%Y-%m-%d %H:%M:%S"),
+        now.strftime("%Y-%m-%d %H:%M:%S"),
+        cid,
+    )
+
+    tags: Dict[str, dict] = {}
+    rows = []
+    for aid, ident in evidence.items():
+        if aid in host_tags:
+            host_tag_list = host_tags[aid] or ["(No Tag)"]
+        else:
+            host_tag_list = ["(Not collected)"]
+
+        for tag in host_tag_list:
+            bucket = tags.setdefault(
+                tag, {"tag": tag, "host_count": 0, "started_only_count": 0,
+                      "engines": set(), "images": set()})
+            bucket["host_count"] += 1
+            if ident["started_only"]:
+                bucket["started_only_count"] += 1
+            bucket["engines"].update(ident["engines"])
+            bucket["images"].update(ident["images"])
+            rows.append({
+                "tag": tag,
+                "host": _mask_aid(aid),
+                "engines": ";".join(ident["engines"]),
+                "images": ";".join(ident["images"]),
+                "started_only": "yes" if ident["started_only"] else "no",
+            })
+
+    ordered = sorted(tags.values(), key=lambda t: t["host_count"], reverse=True)
+
+    print("\n" + "=" * 74)
+    print(f"FCSC EVIDENCE — container identity per tag (CID {cid}, {days}-day tags)")
+    print("=" * 74)
+    print(f"{len(evidence)} container host(s) in the evidence window.\n")
+    print(f"  {'Tag':<28} {'Hosts':>6} {'Started-only':>13}  Engines")
+    print(f"  {'-'*28} {'-'*6} {'-'*13}  {'-'*20}")
+    for t in ordered:
+        engines = ", ".join(sorted(t["engines"])) or "(none)"
+        print(f"  {t['tag'][:28]:<28} {t['host_count']:>6} "
+              f"{t['started_only_count']:>13}  {engines}")
+    print("\nStarted-only hosts run containers but their sensor build sends no "
+          "image identity. The start event is their evidence.")
+    print("=" * 74 + "\n")
+
+    if output_path:
+        import csv
+        fieldnames = ["tag", "host", "engines", "images", "started_only"]
+        with open(output_path, "w", newline="") as csvfile:
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(rows)
+        logger.info("FCSC evidence written to %s", output_path)
         return str(output_path)
 
     return None
