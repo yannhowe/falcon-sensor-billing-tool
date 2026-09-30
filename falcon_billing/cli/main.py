@@ -48,6 +48,10 @@ def main():
                            help="Days to retain when pruning (default: 395)")
     p_collect.add_argument("--workers", type=int, default=10,
                            help="Parallel workers for backfill NGSIEM queries (default: 10)")
+    p_collect.add_argument("--fcsc-info-only", action="store_true",
+                           help="Count FCSC from OciContainerInfo alone (billing-faithful) "
+                                "instead of the OciContainerInfo union with OciContainerStarted "
+                                "that also catches older-build container hosts")
 
     # --- query ---
     p_query = subparsers.add_parser("query", help="Query Sensor Usage API")
@@ -139,14 +143,17 @@ def cmd_collect(args):
         hours = get_hours_to_collect(args.days, db)
         logger.info("Backfilling %d hours", len(hours))
         if len(hours) > 1 and args.workers > 1:
-            parallel_backfill(db, hours, args.cid, falcon_client, workers=args.workers)
+            parallel_backfill(db, hours, args.cid, falcon_client, workers=args.workers,
+                              fcsc_info_only=args.fcsc_info_only)
         else:
             for hour in hours:
-                process_hourly_collection(db, hour, args.cid, falcon_client)
+                process_hourly_collection(db, hour, args.cid, falcon_client,
+                                          fcsc_info_only=args.fcsc_info_only)
     else:
         now = datetime.now(timezone.utc)
         current_hour = now.replace(minute=0, second=0, microsecond=0)
-        process_hourly_collection(db, current_hour, args.cid, falcon_client)
+        process_hourly_collection(db, current_hour, args.cid, falcon_client,
+                                  fcsc_info_only=args.fcsc_info_only)
 
     db.log_audit("collect", f"days={args.days}, cid={args.cid}", "cli")
 

@@ -303,20 +303,25 @@ def process_hourly_collection(
     db: BillingDatabase,
     hour: datetime,
     cid: Optional[str] = None,
-    falcon_client: Optional[Hosts] = None
+    falcon_client: Optional[Hosts] = None,
+    fcsc_info_only: bool = False,
 ) -> Tuple[int, int, int]:
     """
     Args:
         db: BillingDatabase instance
         hour: Target clock hour to collect
         cid: Optional child CID
+        fcsc_info_only: Count FCSC from OciContainerInfo alone (billing-faithful)
+            instead of the OciContainerInfo ∪ OciContainerStarted union.
 
     Returns:
         tuple: (total_sensors, cache_hits, api_calls)
     """
     if falcon_client is None:
         falcon_client = get_falcon_client()
-    _, cid, sensor_ids, container_ids = fetch_hour_sensors(hour, cid, falcon_client)
+    _, cid, sensor_ids, container_ids = fetch_hour_sensors(
+        hour, cid, falcon_client, fcsc_info_only=fcsc_info_only
+    )
     return store_hour_data(db, hour, cid, sensor_ids, falcon_client, container_ids)
 
 
@@ -324,6 +329,7 @@ def fetch_hour_sensors(
     hour: datetime,
     cid: str,
     falcon_client,
+    fcsc_info_only: bool = False,
 ) -> Tuple[datetime, str, List[str], Optional[List[str]]]:
     if not cid or cid == 'default':
         cid = get_falcon_cid()
@@ -348,6 +354,7 @@ def fetch_hour_sensors(
             hour_end_iso, cid,
             client_id=creds["client_id"], client_secret=creds["client_secret"],
             cloud_region=creds["cloud_region"],
+            info_only=fcsc_info_only,
         )
     except NgsiemQueryFailed:
         logger.warning("Container host query failed for %s, classifying from host metadata", hour_start_iso)
@@ -400,6 +407,7 @@ def parallel_backfill(
     cid: str,
     falcon_client,
     workers: int = 10,
+    fcsc_info_only: bool = False,
 ) -> None:
     """
     Fetch all NGSIEM queries concurrently, then store results sequentially.
@@ -413,7 +421,10 @@ def parallel_backfill(
 
     with ThreadPoolExecutor(max_workers=workers) as executor:
         future_to_hour = {
-            executor.submit(fetch_hour_sensors, hour, cid, falcon_client): hour
+            executor.submit(
+                fetch_hour_sensors, hour, cid, falcon_client,
+                fcsc_info_only=fcsc_info_only,
+            ): hour
             for hour in hours
         }
         completed = 0

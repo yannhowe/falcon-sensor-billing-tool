@@ -28,9 +28,23 @@ _BULK_SENSOR_QUERY = """
 """
 
 # OciContainerInfo fires when a container starts and is resent every 24h while
-# it runs.
-_CONTAINER_HOST_QUERY = """
+# it runs. It is KAC-independent and carries container identity, so it is the
+# billing-faithful FCSC signal. Older sensor builds (and hosts with
+# OciContainerSupport off) never emit it, so counting Info alone runs ~5 hosts
+# low against the official number on talon_1.
+_CONTAINER_HOST_QUERY_INFO_ONLY = """
 #event_simpleName=OciContainerInfo
+| groupBy(aid, function=count(), limit=max)
+| select([aid])
+"""
+
+# Union with OciContainerStarted catches the older-build hosts that run
+# containers but never emit OciContainerInfo. This is the showback default: it
+# counts every host showing container activity and errs generous, which suits a
+# per-tag view whose totals already exceed the CID total by design. The billed
+# CID total comes from the Sensor Usage API, not from this query.
+_CONTAINER_HOST_QUERY = """
+#event_simpleName=OciContainerInfo or #event_simpleName=OciContainerStarted
 | groupBy(aid, function=count(), limit=max)
 | select([aid])
 """
@@ -326,9 +340,14 @@ def query_ngsiem_for_container_hosts(
     view_name: str = "search-all",
     max_retries: int = 3,
     timeout_sequence: tuple[int, ...] = (30, 60, 120),
+    info_only: bool = False,
 ) -> list[str]:
     dt_end = datetime.fromisoformat(hour_end.replace("Z", "+00:00"))
     lookback_start = (dt_end - CONTAINER_HOST_LOOKBACK).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    query_string = (
+        _CONTAINER_HOST_QUERY_INFO_ONLY if info_only else _CONTAINER_HOST_QUERY
+    )
 
     return query_ngsiem_for_sensors(
         lookback_start,
@@ -340,7 +359,7 @@ def query_ngsiem_for_container_hosts(
         view_name=view_name,
         max_retries=max_retries,
         timeout_sequence=timeout_sequence,
-        query_string=_CONTAINER_HOST_QUERY,
+        query_string=query_string,
     )
 
 

@@ -2,7 +2,11 @@
 
 from unittest.mock import patch, MagicMock
 import pytest
-from falcon_billing.ngsiem import query_ngsiem_for_sensors, NgsiemQueryFailed
+from falcon_billing.ngsiem import (
+    query_ngsiem_for_sensors,
+    query_ngsiem_for_container_hosts,
+    NgsiemQueryFailed,
+)
 
 
 class TestNgsiemRetry:
@@ -48,3 +52,32 @@ class TestNgsiemRetry:
         # Verify each call got the escalating timeout
         timeouts = [call.kwargs.get("timeout") for call in mock_query.call_args_list]
         assert timeouts == [10, 20, 30]
+
+
+class TestContainerHostQuerySelection:
+    """The FCSC count query defaults to the Info∪Started union so older-build
+    container hosts are counted, with an info_only flag for the billing-faithful
+    OciContainerInfo-alone query."""
+
+    @patch("falcon_billing.ngsiem.query_ngsiem_for_sensors")
+    def test_default_counts_started_union(self, mock_sensors):
+        mock_sensors.return_value = ["aid-1"]
+        query_ngsiem_for_container_hosts(
+            "2026-04-21T11:00:00Z", "abc123",
+            client_id="id", client_secret="secret", cloud_region="us-1",
+        )
+        query = mock_sensors.call_args.kwargs["query_string"]
+        assert "OciContainerInfo" in query
+        assert "OciContainerStarted" in query
+
+    @patch("falcon_billing.ngsiem.query_ngsiem_for_sensors")
+    def test_info_only_excludes_started(self, mock_sensors):
+        mock_sensors.return_value = ["aid-1"]
+        query_ngsiem_for_container_hosts(
+            "2026-04-21T11:00:00Z", "abc123",
+            client_id="id", client_secret="secret", cloud_region="us-1",
+            info_only=True,
+        )
+        query = mock_sensors.call_args.kwargs["query_string"]
+        assert "OciContainerInfo" in query
+        assert "OciContainerStarted" not in query
