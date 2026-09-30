@@ -176,3 +176,61 @@ class TestParallelBackfill:
         assert _counted_hours(db) == [_hour_str(hours[0]), _hour_str(hours[2])]
         assert _hour_str(hours[1]) in str(excinfo.value)
         assert _hour_str(hours[3]) in str(excinfo.value)
+
+
+def _sku_counts(db, hour):
+    [row] = db.get_hourly_counts_for_range(_hour_str(hour), _hour_str(hour), cid="cid1")
+    counts = {sku: row[f"{sku}_count"] for sku in ("fcs", "epp", "fcsc", "fmc")}
+    assert sum(counts.values()) == row["unique_sensor_count"]
+    return counts
+
+
+class TestContainerHostClassification:
+    def test_no_container_hosts_means_zero_fcsc_not_substring_guesses(self, db, falcon):
+        from falcon_billing.collector import process_hourly_collection
+
+        falcon.sensor(HOUR, "office", tags=["SensorGroupingTag/oaks-office"],
+                      product_type_desc="Workstation", system_manufacturer="Dell Inc.")
+        falcon.sensor(HOUR, "vm", system_manufacturer="VMware, Inc.")
+        falcon.container_hosts = []
+
+        process_hourly_collection(db, HOUR, "cid1", falcon.hosts)
+
+        assert _sku_counts(db, HOUR) == {"fcs": 1, "epp": 1, "fcsc": 0, "fmc": 0}
+
+    def test_every_pod_sensor_is_fmc_with_or_without_container_events(self, db, falcon):
+        from falcon_billing.collector import process_hourly_collection
+
+        falcon.sensor(HOUR, "pod-quiet", product_type_desc="Pod")
+        falcon.sensor(HOUR, "pod-oci", product_type_desc="Pod")
+        falcon.sensor(HOUR, "node", product_type_desc="Server")
+        falcon.sensor(HOUR, "laptop", product_type_desc="Workstation")
+        falcon.container_hosts = ["node", "pod-oci"]
+
+        process_hourly_collection(db, HOUR, "cid1", falcon.hosts)
+
+        assert _sku_counts(db, HOUR) == {"fcs": 0, "epp": 1, "fcsc": 1, "fmc": 2}
+
+    def test_failed_container_query_falls_back_to_metadata(self, db, falcon):
+        from falcon_billing.collector import process_hourly_collection
+
+        falcon.sensor(HOUR, "k8s-node", platform_name="K8S")
+        falcon.sensor(HOUR, "laptop", platform_name="Windows", hostname="DESKTOP-1")
+        falcon.container_hosts = None
+
+        process_hourly_collection(db, HOUR, "cid1", falcon.hosts)
+
+        assert _sku_counts(db, HOUR) == {"fcs": 0, "epp": 1, "fcsc": 1, "fmc": 0}
+
+    def test_container_query_covers_25h_of_container_info_ending_at_hour_end(self, db, falcon):
+        from falcon_billing.collector import process_hourly_collection
+
+        falcon.sensor(HOUR, "a")
+        hour_end = HOUR + timedelta(hours=1)
+
+        process_hourly_collection(db, HOUR, "cid1", falcon.hosts)
+
+        [(start, end, query)] = [q for q in falcon.queries if "SensorHeartbeat" not in q[2]]
+        assert (start, end) == (_iso(hour_end - timedelta(hours=25)), _iso(hour_end))
+        assert "#event_simpleName=OciContainerInfo" in query
+        assert "Oci*" not in query
