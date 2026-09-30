@@ -9,6 +9,7 @@ import io
 import json
 import logging
 import os
+import re
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, Optional
@@ -39,11 +40,30 @@ def normalize_cid(cid: str) -> str:
     return cid.split("-")[0].lower()
 
 
+# The 400 body names the newest date with usage data when we ask past it.
+_LATEST_VALID_DATE_RE = re.compile(r"latest valid date:\s*(\d{4}-\d{2}-\d{2})")
+
+
+def _usage_filter(end_date: str, cid: str) -> str:
+    return f"event_date:'{end_date}',period:'{PERIOD_DAYS}',selected_cids:'{normalize_cid(cid)}'"
+
+
 def get_sensor_usage(falcon: SensorUsage, cid: str) -> dict:
     end_date = (datetime.now() - timedelta(days=2)).strftime("%Y-%m-%d")
-    filter_string = f"event_date:'{end_date}',period:'{PERIOD_DAYS}',selected_cids:'{normalize_cid(cid)}'"
+    response = falcon.get_hourly_usage(filter=_usage_filter(end_date, cid))
 
-    response = falcon.get_hourly_usage(filter=filter_string)
+    # Usage data lags real time by a variable few days. When our end_date is
+    # newer than what the API has, the 400 tells us the latest date it holds;
+    # honor that and retry once rather than hardcode a lag that drifts.
+    if response["status_code"] == 400:
+        errors = response.get("body", {}).get("errors") or []
+        message = " ".join(
+            str(e.get("message", "")) for e in errors if isinstance(e, dict)
+        )
+        match = _LATEST_VALID_DATE_RE.search(message)
+        if match:
+            response = falcon.get_hourly_usage(filter=_usage_filter(match.group(1), cid))
+
     if response["status_code"] != 200:
         errors = response.get("body", {}).get("errors") or ["Unknown error"]
         raise RuntimeError(f"HTTP {response['status_code']}: {errors}")
