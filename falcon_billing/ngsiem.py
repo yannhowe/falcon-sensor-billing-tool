@@ -49,13 +49,15 @@ _CONTAINER_HOST_QUERY = """
 | select([aid])
 """
 
-# Evidence query: same union as the count, but collect the identity fields each
-# OciContainerInfo carries so a host billed FCSC can be justified by the images
-# and engines that ran on it. OciContainerStarted carries none of these, so a
+# Evidence query: same union as the count, but collect the human-readable
+# identity each OciContainerInfo carries so a host billed FCSC can be justified
+# by the containers and images that ran on it. OciContainerName is the container
+# name; OciContainerConfigImage is the registry/repo:tag (readable, unlike the
+# sha256 OciContainerImageId). OciContainerStarted carries neither, so a
 # Started-only host groups here with empty identity, which is how it is flagged.
 _CONTAINER_EVIDENCE_QUERY = """
 #event_simpleName=OciContainerInfo or #event_simpleName=OciContainerStarted
-| groupBy([aid], function=collect([OciContainerName, OciContainerImageId, OciContainerEngineType]), limit=max)
+| groupBy([aid], function=collect([OciContainerName, OciContainerConfigImage]), limit=max)
 """
 
 CONTAINER_HOST_LOOKBACK = timedelta(hours=25)
@@ -392,29 +394,40 @@ def _split_collected(value: Optional[str]) -> list:
     return seen
 
 
+def _is_readable_name(name: str) -> bool:
+    """A container name is evidence only if it reads as a name, not a digest.
+
+    Some OciContainerName values arrive as a bare sha256 hex digest (optionally
+    sha256: prefixed), which justifies nothing to a human reading the report.
+    Those are dropped so the names column carries only human-legible identity.
+    """
+    candidate = name[7:] if name.startswith("sha256:") else name
+    return not (len(candidate) == 64 and all(c in "0123456789abcdef" for c in candidate.lower()))
+
+
 def parse_container_evidence(events: list) -> dict:
     """Turn grouped evidence rows into per-host container identity.
 
-    Each row is one aid with its collected OciContainerName, OciContainerImageId,
-    and OciContainerEngineType. A host seen only through OciContainerStarted has
-    none of these, so it is marked started_only. That is the flag the design
-    calls for, derived from the absence of identity rather than a second query.
+    Each row is one aid with its collected OciContainerName (the human-readable
+    container name) and OciContainerConfigImage (the registry/repo:tag, unlike
+    the opaque sha256 OciContainerImageId). A host seen only through
+    OciContainerStarted has neither, so it is marked started_only. That is the
+    flag the design calls for, derived from the absence of identity rather than
+    a second query.
 
-    Returns aid -> {names, images, engines, started_only}.
+    Returns aid -> {names, images, started_only}.
     """
     evidence = {}
     for row in events:
         aid = row.get("aid")
         if not aid:
             continue
-        names = _split_collected(row.get("OciContainerName"))
-        images = _split_collected(row.get("OciContainerImageId"))
-        engines = _split_collected(row.get("OciContainerEngineType"))
+        names = [n for n in _split_collected(row.get("OciContainerName")) if _is_readable_name(n)]
+        images = _split_collected(row.get("OciContainerConfigImage"))
         evidence[aid] = {
             "names": names,
             "images": images,
-            "engines": engines,
-            "started_only": not (names or images or engines),
+            "started_only": not (names or images),
         }
     return evidence
 
@@ -430,11 +443,11 @@ def query_ngsiem_for_container_evidence(
     max_retries: int = 3,
     timeout_sequence: tuple[int, ...] = (30, 60, 120),
 ) -> dict:
-    """Query the FCSC evidence: per-host container names, images, and engines.
+    """Query the FCSC evidence: per-host container names and images.
 
     Runs the OciContainerInfo ∪ OciContainerStarted union over the same 25h
-    lookback as the count, collecting the identity fields. Returns the parsed
-    aid -> identity mapping from :func:`parse_container_evidence`.
+    lookback as the count, collecting the readable identity fields. Returns the
+    parsed aid -> identity mapping from :func:`parse_container_evidence`.
     """
     dt_end = datetime.fromisoformat(hour_end.replace("Z", "+00:00"))
     lookback_start = (dt_end - CONTAINER_HOST_LOOKBACK).strftime("%Y-%m-%dT%H:%M:%SZ")

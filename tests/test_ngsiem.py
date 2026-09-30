@@ -86,7 +86,7 @@ class TestContainerHostQuerySelection:
 
 
 class TestContainerEvidence:
-    """The evidence query collects the identity fields OciContainerInfo carries.
+    """The evidence query collects the readable identity OciContainerInfo carries.
     A host seen only via OciContainerStarted has none, so it is flagged
     started_only from the absence of identity, not a second query."""
 
@@ -94,31 +94,38 @@ class TestContainerEvidence:
         events = [
             {"aid": "host-with-images",
              "OciContainerName": "web\nweb\napi",
-             "OciContainerImageId": "sha256:aaa\nsha256:bbb",
-             "OciContainerEngineType": "docker\ndocker"},
+             "OciContainerConfigImage": "reg.io/web:1\nreg.io/api:2"},
             {"aid": "started-only-host",
              "OciContainerName": "",
-             "OciContainerImageId": "",
-             "OciContainerEngineType": ""},
-            {"aid": None, "OciContainerImageId": "sha256:ccc"},
+             "OciContainerConfigImage": ""},
+            {"aid": None, "OciContainerConfigImage": "reg.io/ccc:1"},
         ]
         parsed = parse_container_evidence(events)
 
         assert None not in parsed
         rich = parsed["host-with-images"]
         assert rich["names"] == ["web", "api"]
-        assert rich["images"] == ["sha256:aaa", "sha256:bbb"]
-        assert rich["engines"] == ["docker"]
+        assert rich["images"] == ["reg.io/web:1", "reg.io/api:2"]
         assert rich["started_only"] is False
 
         assert parsed["started-only-host"]["started_only"] is True
         assert parsed["started-only-host"]["images"] == []
 
+    def test_parse_drops_sha256_digest_container_names(self):
+        digest = "a" * 64
+        events = [
+            {"aid": "h1",
+             "OciContainerName": f"payment-service\nsha256:{digest}\n{digest}",
+             "OciContainerConfigImage": "reg.io/pay:1"},
+        ]
+        parsed = parse_container_evidence(events)
+        assert parsed["h1"]["names"] == ["payment-service"]
+
     @patch("falcon_billing.ngsiem._execute_ngsiem_query")
     def test_evidence_query_collects_identity_and_returns_events(self, mock_exec):
         mock_exec.return_value = [
-            {"aid": "h1", "OciContainerImageId": "sha256:aaa",
-             "OciContainerEngineType": "containerd", "OciContainerName": "n"},
+            {"aid": "h1", "OciContainerConfigImage": "reg.io/n:1",
+             "OciContainerName": "n"},
         ]
         result = query_ngsiem_for_container_evidence(
             "2026-04-21T11:00:00Z", "abc123",
@@ -127,6 +134,6 @@ class TestContainerEvidence:
         kwargs = mock_exec.call_args.kwargs
         assert kwargs["return_events"] is True
         assert "collect(" in kwargs["query_string"]
-        assert "OciContainerImageId" in kwargs["query_string"]
-        assert result["h1"]["engines"] == ["containerd"]
+        assert "OciContainerConfigImage" in kwargs["query_string"]
+        assert result["h1"]["images"] == ["reg.io/n:1"]
         assert result["h1"]["started_only"] is False

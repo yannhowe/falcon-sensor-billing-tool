@@ -355,21 +355,21 @@ class TestGenerateFcscEvidence:
         db.store_hour(hour, "cid1", sensors, total=len(sensors),
                       fcsc_count=fcsc, fmc_count=0, fcs_count=0, epp_count=0)
 
-    def test_rolls_evidence_up_per_tag_with_engines(self, tmp_path, db):
+    def test_rolls_evidence_up_per_tag_with_names(self, tmp_path, db):
         from falcon_billing.collector import generate_fcsc_evidence
 
         self._seed_hosts(db, [
-            {"sensor_id": "aid-docker", "tags": ["SensorGroupingTag/prod"]},
+            {"sensor_id": "aid-named", "tags": ["SensorGroupingTag/prod"]},
             {"sensor_id": "aid-started", "tags": ["SensorGroupingTag/prod"]},
         ], fcsc=2)
 
         evidence = {
-            "aid-docker": {"names": ["web"], "images": ["sha256:aaa"],
-                           "engines": ["docker"], "started_only": False},
-            "aid-started": {"names": [], "images": [], "engines": [],
+            "aid-named": {"names": ["web"], "images": ["reg.io/web:1"],
+                          "started_only": False},
+            "aid-started": {"names": [], "images": [],
                             "started_only": True},
             # In NG-SIEM but never collected by the tool: a coverage gap.
-            "aid-ghost": {"names": [], "images": [], "engines": [],
+            "aid-ghost": {"names": [], "images": [],
                           "started_only": True},
         }
 
@@ -382,12 +382,12 @@ class TestGenerateFcscEvidence:
             rows = list(csv.DictReader(f))
 
         prod = [r for r in rows if r["tag"] == "SensorGroupingTag/prod"]
-        assert {r["host"] for r in prod} == {"aid-dock…", "aid-star…"}
-        docker_row = next(r for r in prod if r["engines"] == "docker")
-        assert docker_row["images"] == "sha256:aaa"
-        assert docker_row["started_only"] == "no"
+        assert {r["host"] for r in prod} == {"aid-name…", "aid-star…"}
+        named_row = next(r for r in prod if r["container_names"] == "web")
+        assert named_row["images"] == "reg.io/web:1"
+        assert named_row["started_only"] == "no"
         started_row = next(r for r in prod if r["started_only"] == "yes")
-        assert started_row["engines"] == ""
+        assert started_row["container_names"] == ""
 
         # The uncollected host is attributed to a distinct coverage bucket, not prod.
         ghost = [r for r in rows if r["tag"] == "(Not collected)"]
@@ -400,8 +400,8 @@ class TestGenerateFcscEvidence:
         full_aid = "0123456789abcdef0123456789abcdef"
         self._seed_hosts(db, [{"sensor_id": full_aid,
                                "tags": ["SensorGroupingTag/prod"]}], fcsc=1)
-        evidence = {full_aid: {"names": [], "images": ["img"],
-                               "engines": ["docker"], "started_only": False}}
+        evidence = {full_aid: {"names": ["web"], "images": ["img"],
+                               "started_only": False}}
 
         out = tmp_path / "evidence.csv"
         generate_fcsc_evidence(db, evidence, cid="cid1", days=1, output_path=str(out))

@@ -642,7 +642,7 @@ def generate_fcsc_evidence(
 
     Joins the per-host container identity from NG-SIEM to the tags the tool
     already stored for each host, then rolls up per tag: how many hosts, how
-    many are Started-only with no image identity, and which engines and images
+    many are Started-only with no identity, and which container names and images
     ran. A host billed FCSC becomes legible instead of asserted. A host in the
     evidence the tool never collected buckets under "(Not collected)", which is
     a coverage gap worth seeing.
@@ -668,16 +668,16 @@ def generate_fcsc_evidence(
         for tag in host_tag_list:
             bucket = tags.setdefault(
                 tag, {"tag": tag, "host_count": 0, "started_only_count": 0,
-                      "engines": set(), "images": set()})
+                      "names": set(), "images": set()})
             bucket["host_count"] += 1
             if ident["started_only"]:
                 bucket["started_only_count"] += 1
-            bucket["engines"].update(ident["engines"])
+            bucket["names"].update(ident["names"])
             bucket["images"].update(ident["images"])
             rows.append({
                 "tag": tag,
                 "host": _mask_aid(aid),
-                "engines": ";".join(ident["engines"]),
+                "container_names": ";".join(ident["names"]),
                 "images": ";".join(ident["images"]),
                 "started_only": "yes" if ident["started_only"] else "no",
             })
@@ -688,19 +688,21 @@ def generate_fcsc_evidence(
     print(f"FCSC EVIDENCE — container identity per tag (CID {cid}, {days}-day tags)")
     print("=" * 74)
     print(f"{len(evidence)} container host(s) in the evidence window.\n")
-    print(f"  {'Tag':<28} {'Hosts':>6} {'Started-only':>13}  Engines")
-    print(f"  {'-'*28} {'-'*6} {'-'*13}  {'-'*20}")
+    print(f"  {'Tag':<24} {'Hosts':>6} {'Started-only':>13}  Container names")
+    print(f"  {'-'*24} {'-'*6} {'-'*13}  {'-'*28}")
     for t in ordered:
-        engines = ", ".join(sorted(t["engines"])) or "(none)"
-        print(f"  {t['tag'][:28]:<28} {t['host_count']:>6} "
-              f"{t['started_only_count']:>13}  {engines}")
+        names = ", ".join(sorted(t["names"])) or "(none)"
+        if len(names) > 44:
+            names = names[:41] + "..."
+        print(f"  {t['tag'][:24]:<24} {t['host_count']:>6} "
+              f"{t['started_only_count']:>13}  {names}")
     print("\nStarted-only hosts run containers but their sensor build sends no "
-          "image identity. The start event is their evidence.")
+          "container identity. The start event is their evidence.")
     print("=" * 74 + "\n")
 
     if output_path:
         import csv
-        fieldnames = ["tag", "host", "engines", "images", "started_only"]
+        fieldnames = ["tag", "host", "container_names", "images", "started_only"]
         with open(output_path, "w", newline="") as csvfile:
             writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
             writer.writeheader()
