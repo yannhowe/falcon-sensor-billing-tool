@@ -28,11 +28,34 @@ _BULK_SENSOR_QUERY = """
 """
 
 # OciContainerInfo fires when a container starts and is resent every 24h while
-# it runs.
-_CONTAINER_HOST_QUERY = """
+# it runs. It is KAC-independent and carries container identity, so it is the
+# billing-faithful FCSC signal. Older sensor builds (and hosts with
+# OciContainerSupport off) never emit it, so counting Info alone runs ~5 hosts
+# low against the official number on talon_1.
+_CONTAINER_HOST_QUERY_INFO_ONLY = """
 #event_simpleName=OciContainerInfo
 | groupBy(aid, function=count(), limit=max)
 | select([aid])
+"""
+
+# Union with OciContainerStarted catches the older-build hosts that run
+# containers but never emit OciContainerInfo. This is the showback default: it
+# counts every host showing container activity and errs generous, which suits a
+# per-tag view whose totals already exceed the CID total by design. The billed
+# CID total comes from the Sensor Usage API, not from this query.
+_CONTAINER_HOST_QUERY = """
+#event_simpleName=OciContainerInfo or #event_simpleName=OciContainerStarted
+| groupBy(aid, function=count(), limit=max)
+| select([aid])
+"""
+
+# Evidence query: same union as the count, but collect the identity fields each
+# OciContainerInfo carries so a host billed FCSC can be justified by the images
+# and engines that ran on it. OciContainerStarted carries none of these, so a
+# Started-only host groups here with empty identity, which is how it is flagged.
+_CONTAINER_EVIDENCE_QUERY = """
+#event_simpleName=OciContainerInfo or #event_simpleName=OciContainerStarted
+| groupBy([aid], function=collect([OciContainerName, OciContainerImageId, OciContainerEngineType]), limit=max)
 """
 
 CONTAINER_HOST_LOOKBACK = timedelta(hours=25)
@@ -105,7 +128,8 @@ def _execute_ngsiem_query(
     view_name: str = "search-all",
     timeout: int = 30,
     query_string: str = _SENSOR_QUERY,
-) -> list[str]:
+    return_events: bool = False,
+) -> list:
     """Execute a single NGSIEM query and return unique sensor IDs.
 
     Submits a LogScale query job for the given time window, polls until
@@ -220,6 +244,9 @@ def _execute_ngsiem_query(
 
         if done and not cancelled:
             events = poll_data.get("events", [])
+            if return_events:
+                logger.info("NGSIEM query complete: %d grouped rows", len(events))
+                return events
             sensor_ids = [
                 event["aid"] for event in events if event.get("aid")
             ]
@@ -326,9 +353,14 @@ def query_ngsiem_for_container_hosts(
     view_name: str = "search-all",
     max_retries: int = 3,
     timeout_sequence: tuple[int, ...] = (30, 60, 120),
+    info_only: bool = False,
 ) -> list[str]:
     dt_end = datetime.fromisoformat(hour_end.replace("Z", "+00:00"))
     lookback_start = (dt_end - CONTAINER_HOST_LOOKBACK).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    query_string = (
+        _CONTAINER_HOST_QUERY_INFO_ONLY if info_only else _CONTAINER_HOST_QUERY
+    )
 
     return query_ngsiem_for_sensors(
         lookback_start,
@@ -340,7 +372,102 @@ def query_ngsiem_for_container_hosts(
         view_name=view_name,
         max_retries=max_retries,
         timeout_sequence=timeout_sequence,
-        query_string=_CONTAINER_HOST_QUERY,
+        query_string=query_string,
+    )
+
+
+# collect() joins each field's values with a newline in the humio events output.
+_COLLECT_SEP = "\n"
+
+
+def _split_collected(value: Optional[str]) -> list:
+    """Split one collect()ed field into its distinct non-empty values, order kept."""
+    if not value:
+        return []
+    seen = []
+    for item in str(value).split(_COLLECT_SEP):
+        item = item.strip()
+        if item and item not in seen:
+            seen.append(item)
+    return seen
+
+
+def parse_container_evidence(events: list) -> dict:
+    """Turn grouped evidence rows into per-host container identity.
+
+    Each row is one aid with its collected OciContainerName, OciContainerImageId,
+    and OciContainerEngineType. A host seen only through OciContainerStarted has
+    none of these, so it is marked started_only. That is the flag the design
+    calls for, derived from the absence of identity rather than a second query.
+
+    Returns aid -> {names, images, engines, started_only}.
+    """
+    evidence = {}
+    for row in events:
+        aid = row.get("aid")
+        if not aid:
+            continue
+        names = _split_collected(row.get("OciContainerName"))
+        images = _split_collected(row.get("OciContainerImageId"))
+        engines = _split_collected(row.get("OciContainerEngineType"))
+        evidence[aid] = {
+            "names": names,
+            "images": images,
+            "engines": engines,
+            "started_only": not (names or images or engines),
+        }
+    return evidence
+
+
+def query_ngsiem_for_container_evidence(
+    hour_end: str,
+    cid: str,
+    *,
+    client_id: str,
+    client_secret: str,
+    cloud_region: str = "us-1",
+    view_name: str = "search-all",
+    max_retries: int = 3,
+    timeout_sequence: tuple[int, ...] = (30, 60, 120),
+) -> dict:
+    """Query the FCSC evidence: per-host container names, images, and engines.
+
+    Runs the OciContainerInfo ∪ OciContainerStarted union over the same 25h
+    lookback as the count, collecting the identity fields. Returns the parsed
+    aid -> identity mapping from :func:`parse_container_evidence`.
+    """
+    dt_end = datetime.fromisoformat(hour_end.replace("Z", "+00:00"))
+    lookback_start = (dt_end - CONTAINER_HOST_LOOKBACK).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    _retryable = (TimeoutError, requests.Timeout, requests.ConnectionError)
+    last_exc: Optional[Exception] = None
+
+    for attempt in range(max_retries):
+        try:
+            events = _execute_ngsiem_query(
+                lookback_start,
+                hour_end,
+                cid,
+                client_id=client_id,
+                client_secret=client_secret,
+                cloud_region=cloud_region,
+                view_name=view_name,
+                timeout=timeout_sequence[attempt],
+                query_string=_CONTAINER_EVIDENCE_QUERY,
+                return_events=True,
+            )
+            return parse_container_evidence(events)
+        except _retryable as exc:
+            last_exc = exc
+            logger.warning(
+                "FCSC evidence query attempt %d/%d failed (%s). Retrying in 2s...",
+                attempt + 1, max_retries, type(exc).__name__,
+            )
+            if attempt < max_retries - 1:
+                time.sleep(2)
+
+    raise NgsiemQueryFailed(
+        f"FCSC evidence query failed after {max_retries} attempts: {last_exc}"
     )
 
 

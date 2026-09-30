@@ -5,6 +5,7 @@ enriches with host metadata, and stores in the billing database.
 """
 
 import logging
+import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
@@ -19,6 +20,7 @@ from falcon_billing.database import BillingDatabase
 from falcon_billing.ngsiem import (
     query_ngsiem_for_sensors,
     query_ngsiem_for_container_hosts,
+    query_ngsiem_for_container_evidence,
     NgsiemQueryFailed,
 )
 
@@ -303,20 +305,25 @@ def process_hourly_collection(
     db: BillingDatabase,
     hour: datetime,
     cid: Optional[str] = None,
-    falcon_client: Optional[Hosts] = None
+    falcon_client: Optional[Hosts] = None,
+    fcsc_info_only: bool = False,
 ) -> Tuple[int, int, int]:
     """
     Args:
         db: BillingDatabase instance
         hour: Target clock hour to collect
         cid: Optional child CID
+        fcsc_info_only: Count FCSC from OciContainerInfo alone (billing-faithful)
+            instead of the OciContainerInfo ∪ OciContainerStarted union.
 
     Returns:
         tuple: (total_sensors, cache_hits, api_calls)
     """
     if falcon_client is None:
         falcon_client = get_falcon_client()
-    _, cid, sensor_ids, container_ids = fetch_hour_sensors(hour, cid, falcon_client)
+    _, cid, sensor_ids, container_ids = fetch_hour_sensors(
+        hour, cid, falcon_client, fcsc_info_only=fcsc_info_only
+    )
     return store_hour_data(db, hour, cid, sensor_ids, falcon_client, container_ids)
 
 
@@ -324,6 +331,7 @@ def fetch_hour_sensors(
     hour: datetime,
     cid: str,
     falcon_client,
+    fcsc_info_only: bool = False,
 ) -> Tuple[datetime, str, List[str], Optional[List[str]]]:
     if not cid or cid == 'default':
         cid = get_falcon_cid()
@@ -348,6 +356,7 @@ def fetch_hour_sensors(
             hour_end_iso, cid,
             client_id=creds["client_id"], client_secret=creds["client_secret"],
             cloud_region=creds["cloud_region"],
+            info_only=fcsc_info_only,
         )
     except NgsiemQueryFailed:
         logger.warning("Container host query failed for %s, classifying from host metadata", hour_start_iso)
@@ -400,6 +409,7 @@ def parallel_backfill(
     cid: str,
     falcon_client,
     workers: int = 10,
+    fcsc_info_only: bool = False,
 ) -> None:
     """
     Fetch all NGSIEM queries concurrently, then store results sequentially.
@@ -413,7 +423,10 @@ def parallel_backfill(
 
     with ThreadPoolExecutor(max_workers=workers) as executor:
         future_to_hour = {
-            executor.submit(fetch_hour_sensors, hour, cid, falcon_client): hour
+            executor.submit(
+                fetch_hour_sensors, hour, cid, falcon_client,
+                fcsc_info_only=fcsc_info_only,
+            ): hour
             for hour in hours
         }
         completed = 0
@@ -459,62 +472,6 @@ def parallel_backfill(
 # ============================================================================
 # Verification Functions
 # ============================================================================
-
-def verify_billing_accuracy(
-    db: BillingDatabase,
-    date: str,
-    cid: str = 'default'
-) -> Tuple[float, float, float, bool]:
-    """
-    Verify calculated 28-day average matches billing API.
-
-    Args:
-        db: BillingDatabase instance
-        date: Date to verify (YYYY-MM-DD)
-        cid: Child CID or 'default'
-
-    Returns:
-        tuple: (calculated_avg, api_avg, diff_pct, passed)
-    """
-    # Calculate 28-day average from hourly_counts
-    calculated_avg = db.calculate_28day_average(cid)["averages"]["total"]
-
-    # Query billing API data
-    billing_data = db.get_billing_average(date, cid)
-
-    if not billing_data:
-        logger.warning(f"No billing API data found for {date}")
-        return calculated_avg, 0.0, 0.0, False
-
-    # Use managed_containers as reference (primary billing number)
-    api_avg = billing_data.get('managed_containers', 0) or 0
-
-    # Calculate difference percentage
-    if api_avg > 0:
-        diff = calculated_avg - api_avg
-        diff_pct = (diff / api_avg) * 100
-    else:
-        diff = calculated_avg
-        diff_pct = 100.0 if calculated_avg > 0 else 0.0
-
-    # Pass if within 1%
-    passed = abs(diff_pct) < 1.0
-
-    if not passed:
-        logger.warning(
-            f"Verification FAILED for {date}: "
-            f"calculated={calculated_avg:.2f}, api={api_avg:.2f}, "
-            f"diff={diff_pct:.2f}%"
-        )
-    else:
-        logger.info(
-            f"Verification PASSED for {date}: "
-            f"calculated={calculated_avg:.2f}, api={api_avg:.2f}, "
-            f"diff={diff_pct:.2f}%"
-        )
-
-    return calculated_avg, api_avg, diff_pct, passed
-
 
 def verify_tag_counts(
     db: BillingDatabase,
@@ -565,65 +522,193 @@ def verify_tag_counts(
     return passed, errors
 
 
-def generate_verification_report(
+def generate_reconciliation(
     db: BillingDatabase,
-    start_date: str,
-    end_date: str,
+    cid: str = 'default',
+    days: int = 28,
     output_path: Optional[str] = None,
-    cid: str = 'default'
-) -> str:
+) -> Optional[str]:
+    """Reconcile the tool's NG-SIEM estimate against the billed total per SKU.
+
+    Puts the tool's own rolling average beside the authoritative Sensor Usage
+    API total for each SKU, with the direction and size of the gap. The billed
+    total is the number that gets billed; the tool's estimate is a sanity check
+    on collection, not a competing total. Both use the same period denominator,
+    so the gap is meaningful. Compares against the most recent billed row.
+
+    Returns the CSV path when output_path is given, else None.
     """
-    Generate daily verification report comparing calculated vs API values.
+    from falcon_billing.billing import billing_row_to_skus
 
-    Args:
-        db: BillingDatabase instance
-        start_date: Start date (YYYY-MM-DD)
-        end_date: End date (YYYY-MM-DD)
-        output_path: Optional output path (default: auto-generated)
-        cid: Child CID or 'default'
+    summary = db.calculate_28day_average(cid, days=days)
+    avgs = summary["averages"]
 
-    Returns:
-        str: Path to generated report
-    """
-    if not output_path:
-        output_dir = Path(__file__).parent.parent / "verification_reports"
-        output_dir.mkdir(exist_ok=True)
-        output_path = output_dir / f"verification_{start_date}_{end_date}.csv"
+    billed_row = db.get_latest_billing_average(cid)
+    if not billed_row:
+        print(
+            f"No billed total stored for CID {cid}. "
+            f"Run 'falcon-billing fetch-billing --cid {cid}' first.",
+            file=sys.stderr,
+        )
+        return None
 
-    # Generate report data
-    import csv
-    from datetime import datetime, timedelta
+    billed = billing_row_to_skus(billed_row)
 
-    start_dt = datetime.strptime(start_date, '%Y-%m-%d')
-    end_dt = datetime.strptime(end_date, '%Y-%m-%d')
-
-    results = []
-    current_dt = start_dt
-
-    while current_dt <= end_dt:
-        date_str = current_dt.strftime('%Y-%m-%d')
-        calculated, api, diff_pct, passed = verify_billing_accuracy(db, date_str, cid)
-
-        results.append({
-            'date': date_str,
-            'calculated_avg': f"{calculated:.2f}",
-            'api_avg': f"{api:.2f}",
-            'diff': f"{calculated - api:.2f}",
-            'diff_pct': f"{diff_pct:.2f}%",
-            'status': 'PASS' if passed else 'FAIL'
+    rows = []
+    for label, key in [("FCS", "fcs"), ("FCSC", "fcsc"), ("FMC", "fmc"), ("EPP", "epp")]:
+        tool_v = avgs.get(key, 0.0)
+        api_v = float(billed.get(key, 0) or 0)
+        gap = tool_v - api_v
+        if api_v:
+            gap_pct = gap / api_v * 100
+        else:
+            gap_pct = 100.0 if tool_v else 0.0
+        direction = "over" if gap > 0 else "under" if gap < 0 else "match"
+        rows.append({
+            "sku": label,
+            "tool_estimate": f"{tool_v:.2f}",
+            "billed": f"{api_v:.2f}",
+            "gap": f"{gap:+.2f}",
+            "gap_pct": f"{gap_pct:+.1f}%",
+            "direction": direction,
         })
 
-        current_dt += timedelta(days=1)
+    coverage = summary["hours_with_data"]
+    period_hours = summary["period_hours"]
 
-    # Write CSV
-    with open(output_path, 'w', newline='') as csvfile:
-        fieldnames = ['date', 'calculated_avg', 'api_avg', 'diff', 'diff_pct', 'status']
-        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(results)
+    print("\n" + "=" * 74)
+    print(f"RECONCILIATION — tool estimate vs billed total (CID {cid}, "
+          f"{summary['period_days']}-day)")
+    print("=" * 74)
+    print(f"Billed date: {billed_row.get('date')}   "
+          f"Collection coverage: {coverage}/{period_hours} hours")
+    print(f"\n  {'SKU':<6} {'Tool est.':>12} {'Billed':>12} {'Gap':>10} {'Gap %':>9}  Direction")
+    print(f"  {'-'*6} {'-'*12} {'-'*12} {'-'*10} {'-'*9}  {'-'*9}")
+    for r in rows:
+        print(f"  {r['sku']:<6} {r['tool_estimate']:>12} {r['billed']:>12} "
+              f"{r['gap']:>10} {r['gap_pct']:>9}  {r['direction']}")
+    print("\nBilled is the authoritative number. The tool estimate is a "
+          "collection sanity check, not a competing total.")
+    print("=" * 74 + "\n")
 
-    logger.info(f"Verification report written to {output_path}")
-    return str(output_path)
+    if output_path:
+        import csv
+        fieldnames = ["sku", "tool_estimate", "billed", "gap", "gap_pct", "direction"]
+        with open(output_path, "w", newline="") as csvfile:
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(rows)
+        logger.info("Reconciliation written to %s", output_path)
+        return str(output_path)
+
+    return None
+
+
+def _mask_aid(aid: str) -> str:
+    """Show enough of an agent ID to tell hosts apart, never the whole ID."""
+    return f"{aid[:8]}…" if len(aid) > 8 else aid
+
+
+def fetch_container_evidence(cid: str = "default", hour_end: Optional[str] = None) -> Dict[str, dict]:
+    """Run the live FCSC evidence query for one CID over the 25h lookback.
+
+    Thin wrapper over the NG-SIEM evidence query that resolves the real CID and
+    the current hour, and loads credentials the same way collection does. Returns
+    the parsed aid -> identity mapping. Kept separate from the rollup so the
+    rollup can be exercised without the network.
+    """
+    if not cid or cid == "default":
+        cid = get_falcon_cid()
+    if hour_end is None:
+        now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+        hour_end = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    creds = load_credentials()
+    return query_ngsiem_for_container_evidence(
+        hour_end, cid,
+        client_id=creds["client_id"], client_secret=creds["client_secret"],
+        cloud_region=creds["cloud_region"],
+    )
+
+
+def generate_fcsc_evidence(
+    db: BillingDatabase,
+    evidence: Dict[str, dict],
+    cid: str = "default",
+    days: int = 28,
+    output_path: Optional[str] = None,
+) -> Optional[str]:
+    """Roll live FCSC evidence up per tag to justify each container-host bill.
+
+    Joins the per-host container identity from NG-SIEM to the tags the tool
+    already stored for each host, then rolls up per tag: how many hosts, how
+    many are Started-only with no image identity, and which engines and images
+    ran. A host billed FCSC becomes legible instead of asserted. A host in the
+    evidence the tool never collected buckets under "(Not collected)", which is
+    a coverage gap worth seeing.
+
+    Returns the CSV path when output_path is given, else None.
+    """
+    now = datetime.now(timezone.utc)
+    start_dt = datetime(now.year, now.month, now.day, tzinfo=timezone.utc) - timedelta(days=days)
+    host_tags = db.get_host_tags_for_range(
+        start_dt.strftime("%Y-%m-%d %H:%M:%S"),
+        now.strftime("%Y-%m-%d %H:%M:%S"),
+        cid,
+    )
+
+    tags: Dict[str, dict] = {}
+    rows = []
+    for aid, ident in evidence.items():
+        if aid in host_tags:
+            host_tag_list = host_tags[aid] or ["(No Tag)"]
+        else:
+            host_tag_list = ["(Not collected)"]
+
+        for tag in host_tag_list:
+            bucket = tags.setdefault(
+                tag, {"tag": tag, "host_count": 0, "started_only_count": 0,
+                      "engines": set(), "images": set()})
+            bucket["host_count"] += 1
+            if ident["started_only"]:
+                bucket["started_only_count"] += 1
+            bucket["engines"].update(ident["engines"])
+            bucket["images"].update(ident["images"])
+            rows.append({
+                "tag": tag,
+                "host": _mask_aid(aid),
+                "engines": ";".join(ident["engines"]),
+                "images": ";".join(ident["images"]),
+                "started_only": "yes" if ident["started_only"] else "no",
+            })
+
+    ordered = sorted(tags.values(), key=lambda t: t["host_count"], reverse=True)
+
+    print("\n" + "=" * 74)
+    print(f"FCSC EVIDENCE — container identity per tag (CID {cid}, {days}-day tags)")
+    print("=" * 74)
+    print(f"{len(evidence)} container host(s) in the evidence window.\n")
+    print(f"  {'Tag':<28} {'Hosts':>6} {'Started-only':>13}  Engines")
+    print(f"  {'-'*28} {'-'*6} {'-'*13}  {'-'*20}")
+    for t in ordered:
+        engines = ", ".join(sorted(t["engines"])) or "(none)"
+        print(f"  {t['tag'][:28]:<28} {t['host_count']:>6} "
+              f"{t['started_only_count']:>13}  {engines}")
+    print("\nStarted-only hosts run containers but their sensor build sends no "
+          "image identity. The start event is their evidence.")
+    print("=" * 74 + "\n")
+
+    if output_path:
+        import csv
+        fieldnames = ["tag", "host", "engines", "images", "started_only"]
+        with open(output_path, "w", newline="") as csvfile:
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(rows)
+        logger.info("FCSC evidence written to %s", output_path)
+        return str(output_path)
+
+    return None
 
 
 # ============================================================================

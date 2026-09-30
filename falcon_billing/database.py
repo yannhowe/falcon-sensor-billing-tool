@@ -28,6 +28,27 @@ logger = logging.getLogger(__name__)
 SCHEMA_VERSION = 3
 
 
+def _normalize_tags(tags_json) -> List[str]:
+    """Parse a sensor_logs tags column into a clean list of non-empty tag strings.
+
+    Sensor tags arrive as a JSON array, sometimes double-encoded (a JSON string
+    holding a JSON array). This absorbs both forms and drops empties, so every
+    reader agrees on what a host's tags are.
+    """
+    try:
+        tags = json.loads(tags_json) if tags_json else []
+    except (json.JSONDecodeError, TypeError):
+        tags = []
+    if isinstance(tags, str):
+        try:
+            tags = json.loads(tags)
+        except (json.JSONDecodeError, TypeError):
+            tags = [tags]
+    if not isinstance(tags, list):
+        tags = []
+    return [t for t in tags if t]
+
+
 class BillingDatabase:
     """SQLite database manager for sensor billing data."""
 
@@ -773,9 +794,31 @@ class BillingDatabase:
             ).fetchall()
             return [dict(row) for row in rows]
 
-    # ========================================================================
-    # Hourly Counts Functions
-    # ========================================================================
+    def get_host_tags_for_range(
+        self, start_hour: str, end_hour: str, cid: str = "default"
+    ) -> Dict[str, List[str]]:
+        """Return sensor_id -> its tags, unioned across the window.
+
+        The FCSC evidence report joins live NG-SIEM identity to the tags the
+        tool already stored per host. A host's tags can shift hour to hour, so
+        the union over the window is the safe attribution set. Hosts with no
+        tags map to an empty list; the caller decides how to bucket them.
+        """
+        rows = self.get_connection().execute(
+            """
+            SELECT sensor_id, tags FROM sensor_logs
+            WHERE hour_timestamp >= ? AND hour_timestamp <= ? AND cid = ?
+            """,
+            (start_hour, end_hour, cid),
+        ).fetchall()
+
+        host_tags: Dict[str, List[str]] = {}
+        for row in rows:
+            bucket = host_tags.setdefault(row["sensor_id"], [])
+            for tag in _normalize_tags(row["tags"]):
+                if tag not in bucket:
+                    bucket.append(tag)
+        return host_tags
 
     def insert_hourly_count(
         self, hour_timestamp: str, cid: str, count: int,
@@ -967,26 +1010,7 @@ class BillingDatabase:
         tag_sensors = {}
         for row in rows:
             sensor_id = row["sensor_id"]
-            tags_json = row["tags"]
-
-            try:
-                tags = json.loads(tags_json) if tags_json else []
-            except (json.JSONDecodeError, TypeError):
-                tags = []
-
-            # Handle double JSON-encoded tags: json.loads returns a string
-            # that needs a second parse to get the actual list
-            if isinstance(tags, str):
-                try:
-                    tags = json.loads(tags)
-                except (json.JSONDecodeError, TypeError):
-                    tags = [tags]
-
-            if not isinstance(tags, list):
-                tags = []
-
-            # Filter out empty strings from tag list
-            tags = [t for t in tags if t]
+            tags = _normalize_tags(row["tags"])
 
             if not tags:
                 tag_sensors.setdefault("(No Tag)", set()).add(sensor_id)
@@ -1064,9 +1088,70 @@ class BillingDatabase:
             ).fetchall()
         return [dict(row) for row in rows]
 
-    # ========================================================================
-    # Billing Averages Functions
-    # ========================================================================
+    def calculate_tag_showback(
+        self, cid: Optional[str] = None, days: int = 28
+    ) -> dict:
+        """Per-tag showback: each tag's rolling-average consumption per SKU.
+
+        Consumption is sensor-hours over the window divided by the full period
+        (days*24), the same denominator calculate_28day_average uses for the CID
+        total, so a tag's number is directly comparable to the billed total. A
+        host carrying several tags counts fully under each, so the tag totals
+        deliberately sum to more than the CID total. This is showback, the full
+        weight of the hosts a tag owns, not a division of the invoice.
+
+        When cid is None or 'default', tags are summed across all CIDs.
+
+        Returns:
+            dict with period metadata and a `tags` list of
+            {tag, total, fcs, fcsc, fmc, epp}, ordered by total descending.
+        """
+        now = datetime.now(timezone.utc)
+        start_dt = datetime(now.year, now.month, now.day, tzinfo=timezone.utc) - timedelta(days=days)
+        start_hour = start_dt.strftime("%Y-%m-%d %H:%M:%S")
+        end_hour = now.strftime("%Y-%m-%d %H:%M:%S")
+        period_hours = days * 24
+
+        select = (
+            "SELECT tag, "
+            "SUM(unique_sensor_count) as total_sum, "
+            "SUM(COALESCE(fcs_count, 0)) as fcs_sum, "
+            "SUM(COALESCE(fcsc_count, 0)) as fcsc_sum, "
+            "SUM(COALESCE(fmc_count, 0)) as fmc_sum, "
+            "SUM(COALESCE(epp_count, 0)) as epp_sum "
+            "FROM hourly_tag_counts WHERE hour_timestamp >= ? AND hour_timestamp <= ? "
+        )
+        conn = self.get_connection()
+        if cid and cid != "default":
+            rows = conn.execute(
+                select + "AND cid = ? GROUP BY tag ORDER BY total_sum DESC",
+                (start_hour, end_hour, cid),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                select + "GROUP BY tag ORDER BY total_sum DESC",
+                (start_hour, end_hour),
+            ).fetchall()
+
+        tags = [
+            {
+                "tag": r["tag"],
+                "total": (r["total_sum"] or 0) / period_hours,
+                "fcs": (r["fcs_sum"] or 0) / period_hours,
+                "fcsc": (r["fcsc_sum"] or 0) / period_hours,
+                "fmc": (r["fmc_sum"] or 0) / period_hours,
+                "epp": (r["epp_sum"] or 0) / period_hours,
+            }
+            for r in rows
+        ]
+        return {
+            "cid": cid or "default",
+            "period_days": days,
+            "period_hours": period_hours,
+            "period_start": start_hour,
+            "period_end": end_hour,
+            "tags": tags,
+        }
 
     def insert_billing_average(self, date: str, data: Dict, cid: str = "default"):
         """
@@ -1122,6 +1207,19 @@ class BillingDatabase:
             WHERE date = ? AND cid = ?
             """,
             (date, cid),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def get_latest_billing_average(self, cid: str = "default") -> Optional[Dict]:
+        """Return the most recent billing_averages row for a CID, or None.
+
+        This is the authoritative billed CID total the showback and
+        reconciliation views display alongside the tool's own estimate.
+        """
+        conn = self.get_connection()
+        row = conn.execute(
+            "SELECT * FROM billing_averages WHERE cid = ? ORDER BY date DESC LIMIT 1",
+            (cid,),
         ).fetchone()
         return dict(row) if row else None
 

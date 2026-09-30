@@ -50,6 +50,75 @@ def get_sensor_usage(falcon: SensorUsage, cid: str) -> dict:
     return response["body"]
 
 
+def _billing_row(resource: dict) -> dict:
+    """Map one Sensor Usage API resource to billing_averages column values.
+
+    The API's SKU field names differ from the tool's column names, so this is
+    the single place that translation lives.
+    """
+    return {
+        "managed_containers": resource.get("lumos", 0),
+        "cloud_vms": resource.get("public_cloud_without_containers", 0),
+        "container_hosts": resource.get("containers", 0),
+        "servers": resource.get("servers_without_containers", 0),
+        "workstations": resource.get("workstations", 0),
+        "mobile": resource.get("mobile", 0),
+        "chrome_os": resource.get("chrome_os", 0),
+        "public_cloud_containers": resource.get("public_cloud_with_containers", 0),
+        "server_containers": resource.get("servers_with_containers", 0),
+    }
+
+
+def billing_row_to_skus(row: dict) -> dict:
+    """Map a stored billing_averages row to the tool's four SKUs.
+
+    The billed total lands in billing_averages under the API's own field names.
+    The tool reports in FCS/FCSC/FMC/EPP, so this is the single place the two
+    vocabularies meet, shared by the showback and reconciliation views.
+
+    FCS is cloud VMs, FCSC is container hosts, FMC is managed containers (pods),
+    and EPP is on-prem endpoints, which the billed total splits into servers and
+    workstations.
+    """
+    return {
+        "fcs": row.get("cloud_vms") or 0,
+        "fcsc": row.get("container_hosts") or 0,
+        "fmc": row.get("managed_containers") or 0,
+        "epp": (row.get("servers") or 0) + (row.get("workstations") or 0),
+    }
+
+
+def store_billing_averages(db, cid: str, falcon: Optional[SensorUsage] = None) -> int:
+    """Fetch the Sensor Usage API for one CID and store its per-date rows.
+
+    This is the authoritative billed total. get_sensor_usage scopes the query
+    with selected_cids, so the numbers are the tenant's own, not the far larger
+    unscoped fleet. Writes one row per date into billing_averages, the table the
+    reconciliation and verify paths read. Returns the number of date rows stored.
+    """
+    if falcon is None:
+        creds = load_credentials()
+        base_url = REGION_MAP.get(creds["cloud_region"])
+        if not base_url:
+            raise ValueError(f"Invalid cloud region: {creds['cloud_region']}")
+        falcon = SensorUsage(
+            client_id=creds["client_id"],
+            client_secret=creds["client_secret"],
+            base_url=base_url,
+        )
+
+    data = get_sensor_usage(falcon, cid)
+    resources = data.get("resources", [])
+    if not resources:
+        raise RuntimeError(f"Sensor Usage returned no rows for CID {cid}")
+
+    for resource in resources:
+        db.insert_billing_average(resource.get("date", ""), _billing_row(resource), cid)
+
+    logger.info("Stored %d billing-average rows for CID %s", len(resources), cid)
+    return len(resources)
+
+
 def auto_discover_child_cids() -> List[tuple]:
     """Auto-discover child CIDs from Flight Control parent CID.
 
@@ -304,18 +373,7 @@ def log_to_csv(
     if db is not None:
         logger.info("Storing billing API data in database...")
         for resource in resources:
-            billing_data = {
-                "managed_containers": resource.get("lumos", 0),
-                "cloud_vms": resource.get("public_cloud_without_containers", 0),
-                "container_hosts": resource.get("containers", 0),
-                "servers": resource.get("servers_without_containers", 0),
-                "workstations": resource.get("workstations", 0),
-                "mobile": resource.get("mobile", 0),
-                "chrome_os": resource.get("chrome_os", 0),
-                "public_cloud_containers": resource.get("public_cloud_with_containers", 0),
-                "server_containers": resource.get("servers_with_containers", 0),
-            }
-            db.insert_billing_average(resource.get("date", ""), billing_data, cid)
+            db.insert_billing_average(resource.get("date", ""), _billing_row(resource), cid)
         logger.info("Billing data stored in database")
 
     return filename

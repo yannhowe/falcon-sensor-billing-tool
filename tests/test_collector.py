@@ -1,5 +1,6 @@
 """Tests for falcon_billing.collector (integration with mocked APIs)."""
 
+import csv
 import json
 import sys
 from datetime import datetime, timedelta, timezone
@@ -287,3 +288,124 @@ class TestReCollectReplacesHour:
         assert _logged_sensor_ids(db, HOUR) == ["a", "b"]
         assert row["unique_sensor_count"] == 2
         assert len(_logged_sensor_ids(db, HOUR)) == row["unique_sensor_count"]
+
+
+def _seed_reconcile_hours(db, cid, total, fcsc, fmc, fcs, epp, n_hours=24):
+    """Store n_hours identical recent hours. With a 1-day window (period_hours=24),
+    24 equal hours make each SKU's rolling average equal its per-hour count, so the
+    reconciliation gap against a billed row is trivial to reason about."""
+    now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+    for i in range(n_hours):
+        hour = (now - timedelta(hours=i)).strftime("%Y-%m-%d %H:%M:%S")
+        db.store_hour(hour, cid, [], total, fcsc, fmc, fcs, epp)
+
+
+class TestGenerateReconciliation:
+    def test_per_sku_gap_and_direction_against_billed(self, tmp_path, db):
+        from falcon_billing.collector import generate_reconciliation
+
+        # Tool estimate: FCS=2, FCSC=1, FMC=0, EPP=0 (24 equal hours, 1-day window).
+        _seed_reconcile_hours(db, "cid1", total=3, fcsc=1, fmc=0, fcs=2, epp=0)
+        # Billed: FCS=3, FCSC=1, FMC=0, EPP=servers 2 + workstations 1 = 3.
+        db.insert_billing_average(
+            "2026-09-28",
+            {"cloud_vms": 3, "container_hosts": 1, "managed_containers": 0,
+             "servers": 2, "workstations": 1},
+            "cid1",
+        )
+
+        out = tmp_path / "recon.csv"
+        result = generate_reconciliation(db, cid="cid1", days=1, output_path=str(out))
+
+        assert result == str(out)
+        with open(out) as f:
+            rows = {r["sku"]: r for r in csv.DictReader(f)}
+
+        assert rows["FCS"]["tool_estimate"] == "2.00"
+        assert rows["FCS"]["billed"] == "3.00"
+        assert rows["FCS"]["gap"] == "-1.00"
+        assert rows["FCS"]["direction"] == "under"
+
+        assert rows["FCSC"]["gap"] == "+0.00"
+        assert rows["FCSC"]["direction"] == "match"
+
+        # EPP is billed 3 (servers+workstations) but the tool collected none.
+        assert rows["EPP"]["billed"] == "3.00"
+        assert rows["EPP"]["tool_estimate"] == "0.00"
+        assert rows["EPP"]["direction"] == "under"
+
+    def test_hints_when_no_billed_row_stored(self, tmp_path, capsys, db):
+        from falcon_billing.collector import generate_reconciliation
+
+        _seed_reconcile_hours(db, "cid1", total=1, fcsc=1, fmc=0, fcs=0, epp=0)
+
+        result = generate_reconciliation(db, cid="cid1", days=1,
+                                         output_path=str(tmp_path / "recon.csv"))
+
+        assert result is None
+        assert not (tmp_path / "recon.csv").exists()
+        err = capsys.readouterr().err
+        assert "fetch-billing" in err
+
+
+class TestGenerateFcscEvidence:
+    def _seed_hosts(self, db, sensors, fcsc):
+        now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+        hour = now.strftime("%Y-%m-%d %H:%M:%S")
+        db.store_hour(hour, "cid1", sensors, total=len(sensors),
+                      fcsc_count=fcsc, fmc_count=0, fcs_count=0, epp_count=0)
+
+    def test_rolls_evidence_up_per_tag_with_engines(self, tmp_path, db):
+        from falcon_billing.collector import generate_fcsc_evidence
+
+        self._seed_hosts(db, [
+            {"sensor_id": "aid-docker", "tags": ["SensorGroupingTag/prod"]},
+            {"sensor_id": "aid-started", "tags": ["SensorGroupingTag/prod"]},
+        ], fcsc=2)
+
+        evidence = {
+            "aid-docker": {"names": ["web"], "images": ["sha256:aaa"],
+                           "engines": ["docker"], "started_only": False},
+            "aid-started": {"names": [], "images": [], "engines": [],
+                            "started_only": True},
+            # In NG-SIEM but never collected by the tool: a coverage gap.
+            "aid-ghost": {"names": [], "images": [], "engines": [],
+                          "started_only": True},
+        }
+
+        out = tmp_path / "evidence.csv"
+        result = generate_fcsc_evidence(db, evidence, cid="cid1", days=1,
+                                        output_path=str(out))
+
+        assert result == str(out)
+        with open(out) as f:
+            rows = list(csv.DictReader(f))
+
+        prod = [r for r in rows if r["tag"] == "SensorGroupingTag/prod"]
+        assert {r["host"] for r in prod} == {"aid-dock…", "aid-star…"}
+        docker_row = next(r for r in prod if r["engines"] == "docker")
+        assert docker_row["images"] == "sha256:aaa"
+        assert docker_row["started_only"] == "no"
+        started_row = next(r for r in prod if r["started_only"] == "yes")
+        assert started_row["engines"] == ""
+
+        # The uncollected host is attributed to a distinct coverage bucket, not prod.
+        ghost = [r for r in rows if r["tag"] == "(Not collected)"]
+        assert len(ghost) == 1
+        assert ghost[0]["host"] == "aid-ghos…"
+
+    def test_masks_agent_ids_in_output(self, tmp_path, db):
+        from falcon_billing.collector import generate_fcsc_evidence
+
+        full_aid = "0123456789abcdef0123456789abcdef"
+        self._seed_hosts(db, [{"sensor_id": full_aid,
+                               "tags": ["SensorGroupingTag/prod"]}], fcsc=1)
+        evidence = {full_aid: {"names": [], "images": ["img"],
+                               "engines": ["docker"], "started_only": False}}
+
+        out = tmp_path / "evidence.csv"
+        generate_fcsc_evidence(db, evidence, cid="cid1", days=1, output_path=str(out))
+
+        text = out.read_text()
+        assert full_aid not in text
+        assert "01234567…" in text

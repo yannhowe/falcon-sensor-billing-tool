@@ -3,9 +3,11 @@
 Usage:
     falcon-billing collect [--hourly] [--days N] [--cid CID] [--prune] [--retain-days N]
     falcon-billing query [--hourly | --weekly] [--cid CID] [--output FILE]
+    falcon-billing fetch-billing --cid CID
     falcon-billing multi-tenant [--auto-discover | --cids CID1,CID2 | --cid-file FILE]
     falcon-billing tag-report [--days N] [--output FILE] [--cid CID] [--format pivot|consolidated]
-    falcon-billing verify --start-date DATE --end-date DATE [--cid CID]
+    falcon-billing verify [--cid CID] [--days N] [--output FILE]
+    falcon-billing fcsc-evidence [--cid CID] [--days N] [--output FILE]
     falcon-billing prune [--retain-days N] [--dry-run]
     falcon-billing dashboard [--port PORT] [--host HOST] [--no-auth]
 """
@@ -48,6 +50,10 @@ def main():
                            help="Days to retain when pruning (default: 395)")
     p_collect.add_argument("--workers", type=int, default=10,
                            help="Parallel workers for backfill NGSIEM queries (default: 10)")
+    p_collect.add_argument("--fcsc-info-only", action="store_true",
+                           help="Count FCSC from OciContainerInfo alone (billing-faithful) "
+                                "instead of the OciContainerInfo union with OciContainerStarted "
+                                "that also catches older-build container hosts")
 
     # --- query ---
     p_query = subparsers.add_parser("query", help="Query Sensor Usage API")
@@ -58,6 +64,14 @@ def main():
                               help="Traditional weekly average (default)")
     p_query.add_argument("--cid", default=None, help="Query specific child CID")
     p_query.add_argument("--output", type=Path, help="Write results to CSV file")
+
+    # --- fetch-billing ---
+    p_fetch = subparsers.add_parser(
+        "fetch-billing",
+        help="Fetch authoritative Sensor Usage API totals into billing_averages")
+    p_fetch.add_argument("--cid", required=True,
+                         help="CID to scope the query (selected_cids); the billed total is "
+                              "only valid when scoped to the tenant")
 
     # --- multi-tenant ---
     p_mt = subparsers.add_parser("multi-tenant", help="Multi-tenant chargeback report")
@@ -79,10 +93,21 @@ def main():
                        help="Output format: pivot (one row per tag) or consolidated (one row per tag+license_type)")
 
     # --- verify ---
-    p_verify = subparsers.add_parser("verify", help="Compare calculated vs API billing")
-    p_verify.add_argument("--start-date", required=True, help="Start date (YYYY-MM-DD)")
-    p_verify.add_argument("--end-date", required=True, help="End date (YYYY-MM-DD)")
+    p_verify = subparsers.add_parser(
+        "verify", help="Reconcile tool estimate against the billed total per SKU")
     p_verify.add_argument("--cid", default="default", help="Target CID")
+    p_verify.add_argument("--days", type=int, default=28,
+                          help="Rolling window in days for the tool estimate (default: 28)")
+    p_verify.add_argument("--output", type=Path, help="Write reconciliation CSV")
+
+    # --- fcsc-evidence ---
+    p_evid = subparsers.add_parser(
+        "fcsc-evidence",
+        help="Justify FCSC per tag: container images and engines per host (NGSIEM)")
+    p_evid.add_argument("--cid", default="default", help="Target CID")
+    p_evid.add_argument("--days", type=int, default=28,
+                        help="Window for host tag attribution in days (default: 28)")
+    p_evid.add_argument("--output", type=Path, help="Write per-host evidence CSV")
 
     # --- prune ---
     p_prune = subparsers.add_parser("prune", help="Remove old data from database")
@@ -114,9 +139,11 @@ def main():
     handlers = {
         "collect": cmd_collect,
         "query": cmd_query,
+        "fetch-billing": cmd_fetch_billing,
         "multi-tenant": cmd_multi_tenant,
         "tag-report": cmd_tag_report,
         "verify": cmd_verify,
+        "fcsc-evidence": cmd_fcsc_evidence,
         "prune": cmd_prune,
         "dashboard": cmd_dashboard,
     }
@@ -139,14 +166,17 @@ def cmd_collect(args):
         hours = get_hours_to_collect(args.days, db)
         logger.info("Backfilling %d hours", len(hours))
         if len(hours) > 1 and args.workers > 1:
-            parallel_backfill(db, hours, args.cid, falcon_client, workers=args.workers)
+            parallel_backfill(db, hours, args.cid, falcon_client, workers=args.workers,
+                              fcsc_info_only=args.fcsc_info_only)
         else:
             for hour in hours:
-                process_hourly_collection(db, hour, args.cid, falcon_client)
+                process_hourly_collection(db, hour, args.cid, falcon_client,
+                                          fcsc_info_only=args.fcsc_info_only)
     else:
         now = datetime.now(timezone.utc)
         current_hour = now.replace(minute=0, second=0, microsecond=0)
-        process_hourly_collection(db, current_hour, args.cid, falcon_client)
+        process_hourly_collection(db, current_hour, args.cid, falcon_client,
+                                  fcsc_info_only=args.fcsc_info_only)
 
     db.log_audit("collect", f"days={args.days}, cid={args.cid}", "cli")
 
@@ -253,6 +283,16 @@ def cmd_query(args):
         print(f"Results written to {csv_path}")
 
 
+def cmd_fetch_billing(args):
+    from falcon_billing.database import BillingDatabase
+    from falcon_billing.billing import store_billing_averages
+
+    db = BillingDatabase(args.db)
+    rows = store_billing_averages(db, args.cid)
+    db.log_audit("fetch-billing", f"cid={args.cid}, rows={rows}", "cli")
+    print(f"Stored {rows} billing-average date rows for the CID from the Sensor Usage API.")
+
+
 def cmd_multi_tenant(args):
     from falcon_billing.billing import auto_discover_child_cids, generate_multitenant_report, load_cid_list
 
@@ -274,67 +314,33 @@ def cmd_multi_tenant(args):
 
 def cmd_tag_report(args):
     from falcon_billing.database import BillingDatabase
+    from falcon_billing.billing import billing_row_to_skus
 
     db = BillingDatabase(args.db)
-
-    # Use pre-aggregated hourly_tag_counts instead of re-querying NGSIEM
     target_hours = args.days * 24
-    now = datetime.now(timezone.utc)
-    cutoff = (now - timedelta(hours=target_hours)).strftime("%Y-%m-%d %H:%M:%S")
 
-    conn = db.get_connection()
+    # Per-tag showback: each tag's own consumption, dividing sensor-hours by the
+    # full period, the same denominator the CID total uses. A multi-tag host
+    # counts fully under each tag, so the tag totals exceed the CID total by
+    # design.
+    showback = db.calculate_tag_showback(cid=args.cid, days=args.days)
+    tags = showback["tags"]
 
-    # Get collected hours for averaging
-    hours_row = conn.execute(
-        "SELECT COUNT(DISTINCT hour_timestamp) as total_hours "
-        "FROM hourly_counts WHERE hour_timestamp >= ?",
-        (cutoff,),
-    ).fetchone()
-    collected_hours = hours_row["total_hours"] or 1
-
-    # Query per-tag per-SKU aggregates
-    cid_filter = args.cid
-    if cid_filter and cid_filter != "default":
-        cursor = conn.execute(
-            "SELECT tag, "
-            "SUM(unique_sensor_count) as total, "
-            "SUM(COALESCE(fcs_count, 0)) as fcs_total, "
-            "SUM(COALESCE(fcsc_count, 0)) as fcsc_total, "
-            "SUM(COALESCE(fmc_count, 0)) as fmc_total, "
-            "SUM(COALESCE(epp_count, 0)) as epp_total "
-            "FROM hourly_tag_counts "
-            "WHERE hour_timestamp >= ? AND cid = ? "
-            "GROUP BY tag ORDER BY total DESC",
-            (cutoff, cid_filter),
-        )
-    else:
-        cursor = conn.execute(
-            "SELECT tag, "
-            "SUM(unique_sensor_count) as total, "
-            "SUM(COALESCE(fcs_count, 0)) as fcs_total, "
-            "SUM(COALESCE(fcsc_count, 0)) as fcsc_total, "
-            "SUM(COALESCE(fmc_count, 0)) as fmc_total, "
-            "SUM(COALESCE(epp_count, 0)) as epp_total "
-            "FROM hourly_tag_counts "
-            "WHERE hour_timestamp >= ? "
-            "GROUP BY tag ORDER BY total DESC",
-            (cutoff,),
-        )
-
-    rows = []
-    for row in cursor.fetchall():
-        rows.append({
-            "tag": row["tag"],
-            "fcs_28day_avg": f"{row['fcs_total'] / collected_hours:.1f}",
-            "fcsc_28day_avg": f"{row['fcsc_total'] / collected_hours:.1f}",
-            "fmc_28day_avg": f"{row['fmc_total'] / collected_hours:.1f}",
-            "epp_28day_avg": f"{row['epp_total'] / collected_hours:.1f}",
-            "total_28day_avg": f"{row['total'] / collected_hours:.1f}",
-        })
-
-    if not rows:
+    if not tags:
         print("No tag data found. Run 'falcon-billing collect' first.", file=sys.stderr)
         sys.exit(1)
+
+    rows = [
+        {
+            "tag": t["tag"],
+            "fcs_28day_avg": f"{t['fcs']:.1f}",
+            "fcsc_28day_avg": f"{t['fcsc']:.1f}",
+            "fmc_28day_avg": f"{t['fmc']:.1f}",
+            "epp_28day_avg": f"{t['epp']:.1f}",
+            "total_28day_avg": f"{t['total']:.1f}",
+        }
+        for t in tags
+    ]
 
     if args.format == "consolidated":
         # Flat format: one row per tag + license_type combination
@@ -368,17 +374,56 @@ def cmd_tag_report(args):
         writer.writeheader()
         writer.writerows(output_rows)
 
-    print(f"\n{len(rows)} tags, {collected_hours} hours collected (target: {target_hours})", file=sys.stderr)
-    db.log_audit("tag_report", f"days={args.days}, tags={len(rows)}, hours={collected_hours}", "cli")
+    # Show the billed CID total beside the showback so the deliberate overage is
+    # legible. Only meaningful for a specific CID; 'default' sums across CIDs.
+    tag_total_sum = sum(t["total"] for t in tags)
+    print(
+        f"\n{len(tags)} tags, {showback['period_days']}-day window "
+        f"(target {target_hours} hours). Tag consumption totals {tag_total_sum:.1f} "
+        f"licenses summed across tags.",
+        file=sys.stderr,
+    )
+    billed = db.get_latest_billing_average(args.cid) if args.cid and args.cid != "default" else None
+    if billed:
+        skus = billing_row_to_skus(billed)
+        billed_total = skus["fcs"] + skus["fcsc"] + skus["fmc"] + skus["epp"]
+        print(
+            f"Billed CID total (Sensor Usage API, {billed.get('date')}): "
+            f"{billed_total:.1f} licenses "
+            f"(FCS {skus['fcs']:.1f}, FCSC {skus['fcsc']:.1f}, "
+            f"FMC {skus['fmc']:.1f}, EPP {skus['epp']:.1f}). "
+            f"Tag totals exceed this by design because shared hosts count fully "
+            f"under every tag that owns them.",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            "Billed CID total not stored. Run 'falcon-billing fetch-billing --cid <cid>' "
+            "to show it beside the per-tag consumption.",
+            file=sys.stderr,
+        )
+
+    db.log_audit("tag_report", f"days={args.days}, tags={len(tags)}", "cli")
 
 
 def cmd_verify(args):
     from falcon_billing.database import BillingDatabase
-    from falcon_billing.collector import generate_verification_report
+    from falcon_billing.collector import generate_reconciliation
 
     db = BillingDatabase(args.db)
-    generate_verification_report(db, args.start_date, args.end_date, args.cid)
-    db.log_audit("verify", f"start={args.start_date}, end={args.end_date}", "cli")
+    generate_reconciliation(db, cid=args.cid, days=args.days, output_path=args.output)
+    db.log_audit("verify", f"cid={args.cid}, days={args.days}", "cli")
+
+
+def cmd_fcsc_evidence(args):
+    from falcon_billing.database import BillingDatabase
+    from falcon_billing.collector import fetch_container_evidence, generate_fcsc_evidence
+
+    db = BillingDatabase(args.db)
+    evidence = fetch_container_evidence(cid=args.cid)
+    generate_fcsc_evidence(db, evidence, cid=args.cid, days=args.days,
+                           output_path=args.output)
+    db.log_audit("fcsc-evidence", f"cid={args.cid}, hosts={len(evidence)}", "cli")
 
 
 def cmd_prune(args):
