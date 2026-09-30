@@ -234,3 +234,56 @@ class TestContainerHostClassification:
         assert (start, end) == (_iso(hour_end - timedelta(hours=25)), _iso(hour_end))
         assert "#event_simpleName=OciContainerInfo" in query
         assert "Oci*" not in query
+
+
+class TestGapDetection:
+    def test_hours_already_in_sensor_logs_are_not_recollected(self, db):
+        from falcon_billing.collector import get_hours_to_collect
+
+        # Two complete hours inside the lookback, stored in the same "YYYY-MM-DD HH:00:00"
+        # format store_hour_data writes. Gap detection must recognise and skip them.
+        now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+        stored = [now - timedelta(hours=2), now - timedelta(hours=3)]
+        conn = db.get_connection()
+        for h in stored:
+            conn.execute(
+                "INSERT INTO sensor_logs (hour_timestamp, sensor_id, cid, collected_at) "
+                "VALUES (?, ?, ?, ?)",
+                (_hour_str(h), f"s-{h.hour}", "default", "2026-01-01T00:00:00"),
+            )
+        conn.commit()
+
+        missing = {_hour_str(h) for h in get_hours_to_collect(2, db)}
+
+        for h in stored:
+            assert _hour_str(h) not in missing
+
+    def test_missing_hours_are_still_returned(self, db):
+        from falcon_billing.collector import get_hours_to_collect
+
+        # An empty db must report every complete hour in the window as missing.
+        missing = get_hours_to_collect(1, db)
+        assert len(missing) == 24
+
+
+class TestReCollectReplacesHour:
+    def test_recollect_replaces_sensor_logs_and_counts(self, db, falcon):
+        from falcon_billing.collector import process_hourly_collection
+
+        for aid in ("a", "b", "c"):
+            falcon.sensor(HOUR, aid)
+        falcon.container_hosts = []
+        process_hourly_collection(db, HOUR, "cid1", falcon.hosts)
+
+        # The fleet shrinks; re-collecting the same hour must drop the departed host,
+        # not leave it behind the way INSERT OR IGNORE did.
+        falcon.heartbeats.clear()
+        falcon.devices.clear()
+        for aid in ("a", "b"):
+            falcon.sensor(HOUR, aid)
+        process_hourly_collection(db, HOUR, "cid1", falcon.hosts)
+
+        [row] = db.get_hourly_counts_for_range(_hour_str(HOUR), _hour_str(HOUR), cid="cid1")
+        assert _logged_sensor_ids(db, HOUR) == ["a", "b"]
+        assert row["unique_sensor_count"] == 2
+        assert len(_logged_sensor_ids(db, HOUR)) == row["unique_sensor_count"]

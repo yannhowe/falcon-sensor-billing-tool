@@ -614,9 +614,18 @@ class BillingDatabase:
             sensors: List of sensor detail dictionaries
             cid: Child CID or 'default'
         """
-        conn = self.get_connection()
-        now = datetime.now(timezone.utc).isoformat()
+        with self._transact() as conn:
+            self._insert_sensor_logs(conn, hour_timestamp, sensors, cid)
 
+    def _insert_sensor_logs(
+        self, conn: sqlite3.Connection, hour_timestamp: str, sensors: List[Dict], cid: str
+    ):
+        """Write sensor_logs rows on an open connection without committing.
+
+        INSERT OR IGNORE dedupes within the hour on UNIQUE(hour_timestamp, sensor_id);
+        callers that need a re-collect to replace the hour delete its rows first.
+        """
+        now = datetime.now(timezone.utc).isoformat()
         for sensor in sensors:
             try:
                 conn.execute(
@@ -648,7 +657,45 @@ class BillingDatabase:
                 logger.error(
                     "Failed to insert sensor log for %s: %s", sensor.get("sensor_id"), e
                 )
-        conn.commit()
+
+    def store_hour(
+        self,
+        hour_timestamp: str,
+        cid: str,
+        sensors: List[Dict],
+        total: int,
+        fcsc_count: int,
+        fmc_count: int,
+        fcs_count: int,
+        epp_count: int,
+    ):
+        """
+        Persist one hour's sensor_logs, hourly_counts and hourly_tag_counts atomically.
+
+        A single transaction covers all three tables, so a mid-write failure rolls back
+        rather than leaving sensor_logs rows with no matching hourly_counts row. Any prior
+        rows for (hour, cid) are deleted first, so a re-collect replaces the hour instead
+        of the old INSERT OR IGNORE, which left a departed host or a partial hour behind.
+
+        Args:
+            hour_timestamp: Clock hour in UTC (YYYY-MM-DD HH:00:00)
+            cid: Child CID or 'default'
+            sensors: Sensor detail dictionaries to log
+            total: Total unique sensor count for the hour
+            fcsc_count, fmc_count, fcs_count, epp_count: Per-SKU counts
+        """
+        with self._transact() as conn:
+            for table in ("sensor_logs", "hourly_counts", "hourly_tag_counts"):
+                conn.execute(
+                    f"DELETE FROM {table} WHERE hour_timestamp = ? AND cid = ?",
+                    (hour_timestamp, cid),
+                )
+            self._insert_sensor_logs(conn, hour_timestamp, sensors, cid)
+            self._insert_hourly_count(
+                conn, hour_timestamp, cid, total,
+                fcsc_count, fmc_count, fcs_count, epp_count,
+            )
+            self._aggregate_tag_counts(conn, hour_timestamp, cid)
 
     def get_sensor_logs_for_range(
         self,
@@ -720,7 +767,18 @@ class BillingDatabase:
             fcs_count: FCS — cloud VMs only (classified via manufacturer/cloud_provider)
             epp_count: EPP — on-prem endpoints (fcs_ids minus cloud VMs)
         """
-        conn = self.get_connection()
+        with self._transact() as conn:
+            self._insert_hourly_count(
+                conn, hour_timestamp, cid, count,
+                fcsc_count, fmc_count, fcs_count, epp_count,
+            )
+
+    def _insert_hourly_count(
+        self, conn: sqlite3.Connection, hour_timestamp: str, cid: str, count: int,
+        fcsc_count: int = None, fmc_count: int = None, fcs_count: int = None,
+        epp_count: int = None
+    ):
+        """Write the hourly_counts row on an open connection without committing."""
         now = datetime.now(timezone.utc).isoformat()
         conn.execute(
             """
@@ -731,7 +789,6 @@ class BillingDatabase:
             """,
             (hour_timestamp, cid, count, fcsc_count, fmc_count, fcs_count, epp_count, now),
         )
-        conn.commit()
 
     def get_hourly_counts_for_range(
         self, start_hour: str, end_hour: str, cid: str = "default"
@@ -855,7 +912,17 @@ class BillingDatabase:
             hour_timestamp: Clock hour to aggregate
             cid: Child CID or 'default'
         """
-        conn = self.get_connection()
+        with self._transact() as conn:
+            self._aggregate_tag_counts(conn, hour_timestamp, cid)
+
+    def _aggregate_tag_counts(
+        self, conn: sqlite3.Connection, hour_timestamp: str, cid: str
+    ):
+        """Aggregate this hour's sensor_logs into hourly_tag_counts, no commit.
+
+        Reads the sensor_logs rows on the same connection, so within store_hour it sees
+        the just-inserted (uncommitted) rows.
+        """
         rows = conn.execute(
             """
             SELECT sensor_id, tags FROM sensor_logs
@@ -906,7 +973,6 @@ class BillingDatabase:
                 """,
                 (hour_timestamp, tag, cid, len(sensor_set), now),
             )
-        conn.commit()
 
     def get_tag_counts_for_range(
         self,

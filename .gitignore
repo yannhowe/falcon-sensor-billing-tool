@@ -64,6 +64,9 @@ sensor_usage_api.json
 # Verification reports directory (NEW)
 verification_reports/
 
+# Local live-verification scratch (credentials-adjacent, CID data): never commit
+.audit/
+
 # macOS
 .DS_Store
 .AppleDouble

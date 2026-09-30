@@ -53,6 +53,16 @@ def get_falcon_client() -> Hosts:
 # Gap Detection Functions
 # ============================================================================
 
+
+def hour_key(hour: datetime) -> str:
+    """Canonical storage key for a clock hour: 'YYYY-MM-DD HH:00:00' in UTC.
+
+    Gap detection and the store path must agree on this exact format, or every
+    hour looks un-collected and gets re-collected on every run.
+    """
+    return hour.strftime("%Y-%m-%d %H:00:00")
+
+
 def get_hours_to_collect(days_back: int, db) -> List[datetime]:
     """
     Determine which hours need collection.
@@ -85,7 +95,7 @@ def get_hours_to_collect(days_back: int, db) -> List[datetime]:
             SELECT DISTINCT hour_timestamp
             FROM sensor_logs
             WHERE hour_timestamp >= ? AND hour_timestamp <= ?
-        """, (start_hour.isoformat(), end_hour.isoformat()))
+        """, (hour_key(start_hour), hour_key(end_hour)))
         existing = {row[0] for row in cursor.fetchall()}
 
     # Generate all hours in range
@@ -96,7 +106,7 @@ def get_hours_to_collect(days_back: int, db) -> List[datetime]:
         hour += timedelta(hours=1)
 
     # Filter to missing hours only
-    missing_hours = [h for h in all_hours if h.isoformat() not in existing]
+    missing_hours = [h for h in all_hours if hour_key(h) not in existing]
 
     logger.info(f"Total hours in range: {len(all_hours)}")
     logger.info(f"Already collected: {len(existing)}")
@@ -354,7 +364,7 @@ def store_hour_data(
     falcon_client,
     container_ids: Optional[List[str]],
 ) -> Tuple[int, int, int]:
-    hour_str = hour.strftime('%Y-%m-%d %H:00:00')
+    hour_str = hour_key(hour)
     if not sensor_ids:
         logger.warning("No sensors found for hour %s", hour_str)
 
@@ -370,15 +380,12 @@ def store_hour_data(
         }
         for sensor_id in sensor_ids
     ]
-    db.insert_sensor_logs(hour_str, sensors_to_insert, cid)
-
     skus = assign_skus(sensor_ids, container_ids, enriched)
     counts = {sku: len(aids) for sku, aids in skus.items()}
-    db.insert_hourly_count(
-        hour_str, cid, len(sensor_ids),
+    db.store_hour(
+        hour_str, cid, sensors_to_insert, len(sensor_ids),
         counts["FCSC"], counts["FMC"], counts["FCS"], counts["EPP"],
     )
-    db.aggregate_tag_counts(hour_str, cid)
     logger.info("Stored %s: FCS=%d EPP=%d FCSC=%d FMC=%d Total=%d",
                 hour_str, counts["FCS"], counts["EPP"], counts["FCSC"], counts["FMC"], len(sensor_ids))
 

@@ -103,6 +103,57 @@ class TestHourlyCounts:
         assert counts[0]["unique_sensor_count"] == 300
 
 
+class TestStoreHour:
+    HOUR = "2026-04-21 10:00:00"
+
+    def _sensors(self, ids):
+        return [{"sensor_id": i, "tags": ["SensorGroupingTag/prod"]} for i in ids]
+
+    def _log_ids(self, db, cid="cid1"):
+        rows = db.get_connection().execute(
+            "SELECT sensor_id FROM sensor_logs WHERE hour_timestamp = ? AND cid = ?",
+            (self.HOUR, cid),
+        ).fetchall()
+        return sorted(r["sensor_id"] for r in rows)
+
+    def test_writes_all_three_tables_in_one_hour(self, db):
+        db.store_hour(self.HOUR, "cid1", self._sensors(["a", "b", "c"]), 3, 1, 0, 1, 1)
+
+        [count] = db.get_hourly_counts_for_range(self.HOUR, self.HOUR, "cid1")
+        tags = db.get_tag_counts_for_range(self.HOUR, self.HOUR, cid="cid1")
+        assert self._log_ids(db) == ["a", "b", "c"]
+        assert count["unique_sensor_count"] == 3
+        assert count["fcsc_count"] == 1
+        assert {t["tag"]: t["unique_sensor_count"] for t in tags} == {"SensorGroupingTag/prod": 3}
+
+    def test_recollect_replaces_prior_rows(self, db):
+        db.store_hour(self.HOUR, "cid1", self._sensors(["a", "b", "c"]), 3, 1, 0, 1, 1)
+        db.store_hour(self.HOUR, "cid1", self._sensors(["a", "b"]), 2, 0, 0, 1, 1)
+
+        [count] = db.get_hourly_counts_for_range(self.HOUR, self.HOUR, "cid1")
+        assert self._log_ids(db) == ["a", "b"]
+        assert count["unique_sensor_count"] == 2
+        assert len(self._log_ids(db)) == count["unique_sensor_count"]
+
+    def test_failure_midway_leaves_no_partial_or_orphan_rows(self, db, monkeypatch):
+        # A good hour exists. A re-store fails after sensor_logs is written but before
+        # hourly_counts, exactly where the non-transactional path left orphans.
+        db.store_hour(self.HOUR, "cid1", self._sensors(["a", "b"]), 2, 0, 0, 1, 1)
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("disk I/O error")
+
+        monkeypatch.setattr(db, "_insert_hourly_count", boom)
+        with pytest.raises(RuntimeError):
+            db.store_hour(self.HOUR, "cid1", self._sensors(["a", "b", "c", "d"]), 4, 0, 0, 2, 2)
+
+        # The whole re-store rolled back to the prior committed state.
+        [count] = db.get_hourly_counts_for_range(self.HOUR, self.HOUR, "cid1")
+        assert self._log_ids(db) == ["a", "b"]
+        assert count["unique_sensor_count"] == 2
+        assert len(self._log_ids(db)) == count["unique_sensor_count"]
+
+
 class TestPruning:
     def test_prune_removes_old_data(self, db):
         old_ts = "2025-01-01 10:00:00"
