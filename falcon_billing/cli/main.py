@@ -103,7 +103,7 @@ def main():
     # --- fcsc-evidence ---
     p_evid = subparsers.add_parser(
         "fcsc-evidence",
-        help="Justify FCSC per tag: container images and engines per host (NGSIEM)")
+        help="Justify FCSC per tag: container names and images per host (NGSIEM)")
     p_evid.add_argument("--cid", default="default", help="Target CID")
     p_evid.add_argument("--days", type=int, default=28,
                         help="Window for host tag attribution in days (default: 28)")

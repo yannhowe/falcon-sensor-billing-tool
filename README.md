@@ -137,7 +137,7 @@ falcon-billing collect       Collect sensor data from NGSIEM + Hosts API
 falcon-billing query         Show 28-day averages from local DB (no API call)
 falcon-billing fetch-billing Fetch authoritative billed totals from Sensor Usage API
 falcon-billing verify        Reconcile tool estimate vs billed total per SKU (local DB)
-falcon-billing fcsc-evidence Per-tag container images/engines per host (NGSIEM)
+falcon-billing fcsc-evidence Per-tag container names/images per host (NGSIEM)
 falcon-billing multi-tenant  Multi-tenant chargeback report via Sensor Usage API
 falcon-billing tag-report    Per-tag host/license showback via local DB
 falcon-billing prune         Remove old data from database
@@ -281,10 +281,11 @@ falcon-billing fcsc-evidence --cid CID --days 7            # tag attribution win
 falcon-billing fcsc-evidence --cid CID --output /tmp/evidence.csv
 ```
 
-Justifies the FCSC count by listing, per tag, the container images and engines
+Justifies the FCSC count by listing, per tag, the container names and images
 running on each host — the concrete evidence behind a container-host license.
-Queries NGSIEM for `OciContainerInfo` (which carries container identity) unioned
-with `OciContainerStarted`. A host seen only via `OciContainerStarted` runs
+Queries NGSIEM for `OciContainerInfo` (which carries `OciContainerName` and the
+readable `OciContainerConfigImage` registry/repo:tag) unioned with
+`OciContainerStarted`. A host seen only via `OciContainerStarted` runs
 containers on an older sensor build that emits no identity fields, so it is
 flagged `started-only` rather than dropped.
 
@@ -292,14 +293,21 @@ flagged `started-only` rather than dropped.
 ==========================================================================
 FCSC EVIDENCE — container identity per tag (CID <CID>, 28-day tags)
 ==========================================================================
-N container host(s) in the evidence window.
+105 container host(s) in the evidence window.
 
-  Tag                           Hosts  Started-only  Engines
-  ---------------------------- ------ -------------  --------------------
-  SensorGroupingTag/prod           12             1  docker, containerd
+  Tag                       Hosts  Started-only  Container names
+  ------------------------ ------ -------------  ----------------------------
+  (No Tag)                     58            15  actions-api-server, ecs-agent...
+  SensorGroupingTags/preco     13             0  alpine, aspm-inventory, autos...
+  SensorGroupingTags/groca      9             0  aaq-operator, alertmanager, a...
+  SensorGroupingTags/lumos      2             2  (none)
 ```
 
-CSV columns: `tag,host,engines,images,started_only`.
+CSV columns: `tag,host,container_names,images,started_only`. `host` is a masked
+agent-ID prefix; `container_names` and `images` are `;`-joined. A `started_only`
+host shows `(none)` for both — its start event is the evidence. `images` carries
+the full registry path, e.g. `mcr.microsoft.com/oss/v2/azure/ip-masq-agent-v2:v0.1.16-16`.
+
 
 ### `prune`
 
@@ -491,7 +499,7 @@ falcon_billing/
     auth.py           # API key authentication
     templates/        # Jinja2 templates
     static/           # CSS and JS
-tests/                # 73 unit tests
+tests/                # 74 unit tests
 falcon_billing.spec   # PyInstaller build spec
 run.sh                # Dashboard + periodic collection script
 ```
